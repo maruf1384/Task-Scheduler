@@ -1,0 +1,17 @@
+<resources>
+    <style name="Theme.TaskPilot" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+
+    <style name="Theme.TaskPilot.Invisible" parent="android:Theme.Translucent.NoTitleBar">
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
+
+    <color name="bg">#FFF6F7FB</color>
+    <color name="brand">#FF3D4ED8</color>
+    <color name="brand_dark">#FF1E2A78</color>
+</resources>

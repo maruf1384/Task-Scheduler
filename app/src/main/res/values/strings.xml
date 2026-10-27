@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">TaskPilot</string>
+    <string name="a11y_label">TaskPilot automation</string>
+    <string name="a11y_desc">Lets TaskPilot tap buttons (like Run in Pydroid 3 or Send in WhatsApp) only while one of your scheduled automations is running. It stays idle the rest of the time, reads nothing in the background and sends nothing anywhere — everything stays on this phone.</string>
+</resources>
