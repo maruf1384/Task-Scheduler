@@ -31,8 +31,13 @@ object Scheduler {
         return null
     }
 
-    fun scheduleAll(ctx: Context, justFired: Boolean = false) {
-        Repo.workflows.value.forEach { schedule(ctx, it, justFired) }
+    /**
+     * Re-arm every automation's alarm. [firedId] is the one that just fired at this exact minute:
+     * only that one is pushed to the next slot, so a different automation due the same minute
+     * still fires instead of being skipped to next week.
+     */
+    fun scheduleAll(ctx: Context, firedId: String? = null) {
+        Repo.workflows.value.forEach { schedule(ctx, it, justFired = it.id == firedId) }
     }
 
     fun schedule(ctx: Context, wf: Workflow, justFired: Boolean = false) {
@@ -83,7 +88,7 @@ class AlarmReceiver : BroadcastReceiver() {
     override fun onReceive(ctx: Context, intent: Intent) {
         if (intent.action != Scheduler.ACTION_RUN) return
         val id = intent.getStringExtra(Scheduler.EXTRA_ID) ?: return
-        Scheduler.scheduleAll(ctx, justFired = true)
+        Scheduler.scheduleAll(ctx, firedId = id)
         Runner.launch(ctx.applicationContext, id, "Scheduled")
     }
 }
