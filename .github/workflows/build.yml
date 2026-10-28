@@ -24,7 +24,22 @@ jobs:
           gradle-version: "8.9"
 
       - name: Build
-        run: gradle assembleRelease assembleDebug --stacktrace --no-daemon
+        run: |
+          set -o pipefail
+          gradle assembleDebug assembleRelease --no-daemon --console=plain 2>&1 | tee build.log
+
+      - name: Report errors 1-10
+        if: failure()
+        run: python3 .github/scripts/report.py 0
+      - name: Report errors 11-20
+        if: failure()
+        run: python3 .github/scripts/report.py 10
+      - name: Report errors 21-30
+        if: failure()
+        run: python3 .github/scripts/report.py 20
+      - name: Report errors 31-40
+        if: failure()
+        run: python3 .github/scripts/report.py 30
 
       - name: Collect APKs
         run: |
