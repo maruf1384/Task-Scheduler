@@ -7,7 +7,9 @@ import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateContentSize
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -54,6 +56,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -63,6 +66,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import com.taskpilot.app.data.Repo
 import com.taskpilot.app.data.RunRecord
+import com.taskpilot.app.engine.Oem
 import com.taskpilot.app.engine.Perms
 import com.taskpilot.app.engine.Scheduler
 import com.taskpilot.app.ui.EmojiBadge
@@ -237,26 +241,10 @@ fun SetupTab() {
         item {
             PermCard(Icons.Rounded.Accessibility, "Accessibility service",
                 "Lets TaskPilot tap Run in Pydroid and Send in WhatsApp. It stays idle except during a run.",
-                a11y, "Turn on") { open(ctx, Perms.accessibilityIntent()) }
+                a11y, "Turn on") { open(ctx, Perms.accessibilityIntent(ctx)) }
         }
-        if (!a11y) {
-            item {
-                Card(
-                    shape = MaterialTheme.shapes.medium,
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-                ) {
-                    Column(Modifier.padding(14.dp)) {
-                        Text("Switch greyed out or “Restricted setting”?", style = MaterialTheme.typography.titleSmall)
-                        Text(
-                            "Android blocks this for apps installed from a file. Open App info → ⋮ (top right) → “Allow restricted settings”, then come back and turn the service on.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(top = 4.dp, bottom = 8.dp),
-                        )
-                        OutlinedButton(onClick = { open(ctx, Perms.appInfoIntent(ctx)) }) { Text("Open App info") }
-                    }
-                }
-            }
+        if (!a11y && Oem.restrictedSettingsApply) {
+            item { RestrictedSettingsCard(ctx) }
         }
         item {
             PermCard(Icons.Rounded.SdStorage, "All files access",
@@ -295,14 +283,16 @@ fun SetupTab() {
                 action = if (secure) ("Lock settings" to { open(ctx, Perms.securitySettingsIntent()) }) else null,
             )
         }
-        item {
-            InfoCard(
-                Icons.Rounded.RocketLaunch,
-                "Realme / OPPO / Xiaomi phones",
-                "These phones close background apps aggressively. In App info turn on “Allow auto-launch” (or Autostart) and set Battery to “Don't optimise / Allow background activity”. If the accessibility service ever turns itself off, switch it back on here.",
-                MaterialTheme.colorScheme.primary,
-                action = "App info" to { open(ctx, Perms.appInfoIntent(ctx)) },
-            )
+        if (Oem.isHeavySkin) {
+            item {
+                InfoCard(
+                    Icons.Rounded.RocketLaunch,
+                    "${Oem.label} background limits",
+                    "${Oem.label} phones close background apps aggressively. In App info turn on “Allow auto-launch” (or Autostart / Startup manager) and set Battery to “Don't optimise / Allow background activity”. If the accessibility service ever turns itself off, switch it back on here.",
+                    MaterialTheme.colorScheme.primary,
+                    action = "App info" to { open(ctx, Perms.appInfoIntent(ctx)) },
+                )
+            }
         }
         item {
             InfoCard(
@@ -312,6 +302,58 @@ fun SetupTab() {
                 Success,
                 action = null,
             )
+        }
+    }
+}
+
+@Composable
+private fun RestrictedSettingsCard(ctx: Context) {
+    Card(
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Rounded.ErrorOutline, null, Modifier.size(20.dp), tint = Warn)
+                Spacer(Modifier.width(8.dp))
+                Text("Switch greyed out, or “Restricted setting”?", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            }
+            Text(
+                "Android blocks the accessibility switch for apps installed from a file (not the Play Store). " +
+                    "The fix on ${Oem.label} — the first step is the one most people miss:",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 8.dp, bottom = 10.dp),
+            )
+            Oem.restrictedSteps().forEachIndexed { i, step ->
+                Row(Modifier.padding(bottom = 8.dp), verticalAlignment = Alignment.Top) {
+                    Box(
+                        Modifier.size(22.dp).clip(androidx.compose.foundation.shape.CircleShape)
+                            .background(MaterialTheme.colorScheme.primary),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("${i + 1}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onPrimary, fontWeight = FontWeight.Bold)
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Text(step, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 1.dp))
+                }
+            }
+            if (Oem.isHuawei) {
+                Text(
+                    "Tip for Honor / Huawei: if you still can't find it, open Settings → Security & privacy → More settings and look for “Install unknown apps” / restricted permissions.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 8.dp),
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                FilledTonalButton(onClick = { open(ctx, Perms.accessibilityIntent(ctx)) }, modifier = Modifier.weight(1f)) {
+                    Text("Accessibility", maxLines = 1)
+                }
+                OutlinedButton(onClick = { open(ctx, Perms.appInfoIntent(ctx)) }, modifier = Modifier.weight(1f)) {
+                    Text("App info", maxLines = 1)
+                }
+            }
         }
     }
 }

@@ -32,7 +32,7 @@ Set the time (default 12:40 AM) and days in the Schedule card, then switch it on
 
 ## First-time setup (Setup tab walks you through it)
 
-1. **Accessibility service** — needed to tap Run/Send. If the switch is greyed out: *App info → ⋮ → Allow restricted settings*.
+1. **Accessibility service** — needed to tap Run/Send. If the switch is greyed out or says *“Restricted setting”* (Android 13+ blocks apps installed from a file), the Setup tab shows step-by-step help tailored to your phone brand. The key step people miss: **tap the greyed switch once first** so the *“Restricted setting”* message appears — then tap **Allow** on that message, or **App info → ⋮ → Allow restricted settings** (on Honor/Huawei, which have no ⋮ menu, the Allow option is on the message itself).
 2. **All files access**
 3. **Exact alarms**
 4. **No battery restriction** — on Realme/OPPO also enable *Allow auto-launch*.
