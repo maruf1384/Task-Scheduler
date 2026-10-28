@@ -1,7 +1,6 @@
 package com.taskpilot.app.engine
 
 import android.app.KeyguardManager
-import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
@@ -107,22 +106,36 @@ object StepExec {
         val pkg = step.s("pkg")
         val app = step.s("appName", pkg.ifBlank { "the app" })
         if (pkg.isNotBlank() && !installed(ctx, pkg)) return fail("$app isn't installed")
-        val uri: Uri = if (step.s("uriMode", "file") == "file") Uri.fromFile(f) else FileOps.uriFor(ctx, f)
+        // Try the chosen link type first, then automatically fall back to the other one:
+        // some apps (e.g. Pydroid 3 builds) accept only a real file path, others only a content link.
+        val chosen = step.s("uriMode", "file")
+        val modes = if (chosen == "file") listOf("file", "content") else listOf("content", "file")
+        val mimes = listOf(FileOps.mime(f), "text/plain", "*/*").distinct()
         var opened = false
-        for (m in listOf(FileOps.mime(f), "text/plain", "*/*").distinct()) {
-            val i = Intent(Intent.ACTION_VIEW).setDataAndType(uri, m).addFlags(
-                Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
-            )
-            if (pkg.isNotBlank()) i.setPackage(pkg)
-            try {
-                svc.startActivity(i)
-                opened = true
-                break
-            } catch (_: ActivityNotFoundException) {
-            } catch (_: SecurityException) {
+        outer@ for (mode in modes) {
+            val uri: Uri = try {
+                if (mode == "file") Uri.fromFile(f) else FileOps.uriFor(ctx, f)
+            } catch (_: Exception) {
+                continue@outer
+            }
+            for (m in mimes) {
+                val i = Intent(Intent.ACTION_VIEW).setDataAndType(uri, m).addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                )
+                if (pkg.isNotBlank()) i.setPackage(pkg)
+                try {
+                    svc.startActivity(i)
+                    opened = true
+                    break@outer
+                } catch (_: Exception) {
+                    // ActivityNotFoundException, SecurityException, FileUriExposedException… try the next mime/mode.
+                }
             }
         }
-        if (!opened) return fail("$app can't open .${f.extension} files this way. Try the other link type in this step.")
+        if (!opened) return fail(
+            "$app wouldn't open .${f.extension} from another app. Open $app yourself and load the file there, " +
+                "or use an “Open app” step followed by on-screen taps.",
+        )
         if (pkg.isNotBlank() && !svc.waitForPackage(pkg, 15_000)) return fail("$app didn't open")
         delay(1000)
         return ok("Opened ${f.name} in $app")

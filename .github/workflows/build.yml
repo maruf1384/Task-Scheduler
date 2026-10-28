@@ -44,8 +44,12 @@ jobs:
       - name: Collect APKs
         run: |
           mkdir -p out
-          cp app/build/outputs/apk/release/app-release.apk out/TaskPilot.apk
-          cp app/build/outputs/apk/debug/app-debug.apk out/TaskPilot-debug.apk
+          VN=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)
+          echo "VERSION_NAME=$VN" >> "$GITHUB_ENV"
+          # Version-numbered filenames. Installing still updates the previous
+          # version in place (Android keys updates on package id + signature, not file name).
+          cp app/build/outputs/apk/release/app-release.apk "out/TaskPilot-${VN}.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "out/TaskPilot-${VN}-debug.apk"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -55,7 +59,7 @@ jobs:
       # A release gives a direct download link that works from the phone's browser.
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-${{ github.run_number }}
-          name: TaskPilot build ${{ github.run_number }}
-          body: "Install **TaskPilot.apk** on your phone. Builds are signed with the same key, so each one installs over the previous one and keeps your automations."
+          tag_name: v${{ env.VERSION_NAME }}-build${{ github.run_number }}
+          name: TaskPilot ${{ env.VERSION_NAME }} (build ${{ github.run_number }})
+          body: "Install **TaskPilot-${{ env.VERSION_NAME }}.apk** on your phone. Builds are signed with the same key, so each one installs over the previous one and keeps your automations."
           files: out/*.apk
