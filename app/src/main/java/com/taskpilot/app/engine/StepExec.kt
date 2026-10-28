@@ -264,9 +264,14 @@ object StepExec {
         if (!svc.waitForPackage(pkg, 15_000)) return fail("WhatsApp didn't open")
         delay(1500)
         if (!step.b("autoSend", true)) return ok("Chat opened with ${rc.files.size} file(s) — waiting for you to press Send")
-        val clicks = svc.pressSend(pkg)
-        return if (clicks > 0) ok("Sent ${rc.files.size} file(s) to +$number")
-        else fail("Couldn't find WhatsApp's Send button. Is +$number a WhatsApp contact?")
+        val names = rc.files.flatMap { listOf(it.name, it.nameWithoutExtension) }.distinct()
+        val r = svc.sendAndConfirm(pkg, names)
+        return when {
+            r.seenInChat && r.clicks > 0 -> ok("Sent ${rc.files.size} file(s) to +$number — they're in the chat")
+            r.seenInChat -> ok("Sent ${rc.files.size} file(s) to +$number — WhatsApp sent them, they're in the chat")
+            r.clicks > 0 -> ok("Pressed Send ${r.clicks}× for ${rc.files.size} file(s) to +$number (couldn't see them in the chat to double-check)")
+            else -> fail("No Send button found and the files didn't show up in the chat with +$number. Please check WhatsApp. On screen: ${r.screen}")
+        }
     }
 
     private suspend fun shareFiles(ctx: Context, svc: AutomationService, step: Step, rc: RunContext): Outcome {

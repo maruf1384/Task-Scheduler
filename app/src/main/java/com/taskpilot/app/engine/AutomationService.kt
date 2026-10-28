@@ -355,35 +355,81 @@ class AutomationService : AccessibilityService() {
 
     // ------------------------------------------------------------------ WhatsApp send
 
-    private fun findSend(pkg: String): AccessibilityNodeInfo? = findFirst(pkg) { n ->
-        if (!n.isVisibleToUser) return@findFirst false
+    private val sendWords = setOf("send", "পাঠান", "পাঠাও")
+    private val sendIds = listOf(":id/send", ":id/send_btn", ":id/send_media_btn", ":id/send_button", ":id/media_send", ":id/send_container")
+
+    private fun isSendNode(n: AccessibilityNodeInfo): Boolean {
+        if (!n.isVisibleToUser) return false
         val id = n.viewIdResourceName ?: ""
-        val t = txt(n)
-        val d = dsc(n)
-        id == "$pkg:id/send" || id == "$pkg:id/send_media_btn" || id == "$pkg:id/send_btn" ||
-            d.equals("Send", ignoreCase = true) ||
-            (id == "android:id/button1" && t.equals("Send", ignoreCase = true))
+        val t = txt(n).lowercase()
+        val d = dsc(n).lowercase()
+        return sendIds.any { id.endsWith(it) } ||
+            d in sendWords ||
+            ((n.isClickable || id == "android:id/button1") && t in sendWords)
     }
 
-    /** Presses Send (and the "Send to …?" confirm dialog) until nothing is left to press. */
-    suspend fun pressSend(pkg: String, timeoutMs: Long = 45_000): Int {
-        val end = System.currentTimeMillis() + timeoutMs
+    private fun findSend(pkg: String): AccessibilityNodeInfo? = findFirst(pkg) { isSendNode(it) }
+
+    /** True when any of [names] is shown as text inside [pkg] (e.g. sent document bubbles in the chat). */
+    fun showsAnyText(pkg: String, names: List<String>): Boolean {
+        val needles = names.map { it.lowercase() }.filter { it.length >= 4 }
+        if (needles.isEmpty()) return false
+        return findFirst(pkg) { n ->
+            if (!n.isVisibleToUser) return@findFirst false
+            val t = (txt(n) + " " + dsc(n)).lowercase()
+            needles.any { t.contains(it) }
+        } != null
+    }
+
+    /** Short description of what is on screen in [pkg] — saved in History when something goes wrong. */
+    fun describeScreen(pkg: String, max: Int = 10): String {
+        val parts = LinkedHashSet<String>()
+        for (r in roots(pkg)) {
+            walk(r, 0) { n, _ ->
+                if (parts.size >= max || !n.isVisibleToUser) return@walk
+                if (!(n.isClickable || n.isEditable)) return@walk
+                val id = (n.viewIdResourceName ?: "").substringAfter(":id/", "")
+                val label = txt(n).ifBlank { dsc(n) }.take(24)
+                val p = listOf(id, if (label.isNotBlank()) "“$label”" else "").filter { it.isNotBlank() }.joinToString(" ")
+                if (p.isNotBlank()) parts += p
+            }
+        }
+        return if (parts.isEmpty()) "nothing tappable found" else parts.joinToString(", ")
+    }
+
+    data class SendResult(val clicks: Int, val seenInChat: Boolean, val screen: String)
+
+    /**
+     * Presses Send (and the "Send to …?" confirmation) until nothing is left to press, then checks
+     * that the files really are in the chat. WhatsApp sometimes sends by itself or uses a button
+     * we don't recognise — the chat check catches both cases.
+     */
+    suspend fun sendAndConfirm(pkg: String, fileNames: List<String>, timeoutMs: Long = 45_000): SendResult {
+        val start = System.currentTimeMillis()
+        val end = start + timeoutMs
         var clicks = 0
         var lastClick = 0L
-        while (System.currentTimeMillis() < end && clicks < 4) {
-            val n = findSend(pkg)
+        var quietChecks = 0          // consecutive checks with files in chat and no Send button
+        while (System.currentTimeMillis() < end) {
+            val n = if (clicks < 4) findSend(pkg) else null
             if (n != null) {
+                quietChecks = 0
                 if (clickNode(n) || tapNode(n)) {
                     clicks++
                     lastClick = System.currentTimeMillis()
                     delay(2200)
                     continue
                 }
+            } else if (showsAnyText(pkg, fileNames)) {
+                quietChecks++
+                if (quietChecks >= 3) return SendResult(clicks, true, "")
+            } else {
+                quietChecks = 0
             }
-            if (clicks > 0 && System.currentTimeMillis() - lastClick > 5000) break
+            if (clicks > 0 && System.currentTimeMillis() - lastClick > 8000) break
             delay(500)
         }
-        return clicks
+        return SendResult(clicks, false, describeScreen(pkg))
     }
 
     // ------------------------------------------------------------------ element capture
