@@ -13,8 +13,8 @@ android {
         applicationId = "com.taskpilot.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 3
+        versionName = "1.1.1"
     }
 
     // One fixed key so every new build installs over the old one (your automations are kept).
