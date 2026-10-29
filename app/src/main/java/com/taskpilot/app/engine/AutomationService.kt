@@ -356,19 +356,44 @@ class AutomationService : AccessibilityService() {
     // ------------------------------------------------------------------ WhatsApp send
 
     private val sendWords = setOf("send", "পাঠান", "পাঠাও")
-    private val sendIds = listOf(":id/send", ":id/send_btn", ":id/send_media_btn", ":id/send_button", ":id/media_send", ":id/send_container")
 
-    private fun isSendNode(n: AccessibilityNodeInfo): Boolean {
-        if (!n.isVisibleToUser) return false
+    /** Buttons that only exist on WhatsApp's "preview before sending" screens. */
+    private val previewSendIds = listOf(":id/send_media_btn", ":id/media_send", ":id/send_button", ":id/send_btn", ":id/send_container")
+
+    /**
+     * The chat's own round button. In current WhatsApp it is ONE view that shows either Send
+     * (when text is typed) or the microphone (when the box is empty) — pressing it as a
+     * microphone records and sends a voice note. Only its description tells them apart.
+     */
+    private val COMPOSER_SEND_ID = ":id/send"
+
+    private val voiceWords = listOf("voice", "record", "microphone", "audio", "mic", "ভয়েস", "রেকর্ড", "অডিও", "মাইক")
+
+    private fun isVoiceLike(n: AccessibilityNodeInfo): Boolean {
+        val id = (n.viewIdResourceName ?: "").lowercase().substringAfter(":id/", "")
+        if (listOf("voice", "mic", "record", "ptt", "audio").any { id.contains(it) }) return true
+        val label = (txt(n) + " " + dsc(n)).lowercase()
+        return voiceWords.any { label.contains(it) }
+    }
+
+    private enum class SendKind { CONFIRM_DIALOG, PREVIEW, COMPOSER }
+
+    private fun sendKind(n: AccessibilityNodeInfo): SendKind? {
+        if (!n.isVisibleToUser || isVoiceLike(n)) return null
         val id = n.viewIdResourceName ?: ""
         val t = txt(n).lowercase()
         val d = dsc(n).lowercase()
-        return sendIds.any { id.endsWith(it) } ||
-            d in sendWords ||
-            ((n.isClickable || id == "android:id/button1") && t in sendWords)
+        return when {
+            id == "android:id/button1" && t in sendWords -> SendKind.CONFIRM_DIALOG
+            previewSendIds.any { id.endsWith(it) } -> SendKind.PREVIEW
+            id.endsWith(COMPOSER_SEND_ID) -> if (d in sendWords) SendKind.COMPOSER else null   // never the microphone
+            n.isClickable && (t in sendWords || d in sendWords) -> SendKind.PREVIEW
+            else -> null
+        }
     }
 
-    private fun findSend(pkg: String): AccessibilityNodeInfo? = findFirst(pkg) { isSendNode(it) }
+    private fun findSend(pkg: String, kind: SendKind): AccessibilityNodeInfo? =
+        findFirst(pkg) { sendKind(it) == kind }
 
     /** True when any of [names] is shown as text inside [pkg] (e.g. sent document bubbles in the chat). */
     fun showsAnyText(pkg: String, names: List<String>): Boolean {
@@ -400,36 +425,52 @@ class AutomationService : AccessibilityService() {
     data class SendResult(val clicks: Int, val seenInChat: Boolean, val screen: String)
 
     /**
-     * Presses Send (and the "Send to …?" confirmation) until nothing is left to press, then checks
-     * that the files really are in the chat. WhatsApp sometimes sends by itself or uses a button
-     * we don't recognise — the chat check catches both cases.
+     * Presses the "Send to …?" confirmation / the preview screen's Send button, then confirms the
+     * files are in the chat and STOPS. The chat's own mic/Send button is pressed only when a
+     * caption was typed and it really shows "Send" — never as a microphone.
      */
-    suspend fun sendAndConfirm(pkg: String, fileNames: List<String>, timeoutMs: Long = 45_000): SendResult {
+    suspend fun sendAndConfirm(
+        pkg: String,
+        fileNames: List<String>,
+        captionTyped: Boolean,
+        timeoutMs: Long = 45_000,
+    ): SendResult {
         val start = System.currentTimeMillis()
         val end = start + timeoutMs
         var clicks = 0
         var lastClick = 0L
-        var quietChecks = 0          // consecutive checks with files in chat and no Send button
-        while (System.currentTimeMillis() < end) {
-            val n = if (clicks < 4) findSend(pkg) else null
-            if (n != null) {
-                quietChecks = 0
-                if (clickNode(n) || tapNode(n)) {
-                    clicks++
-                    lastClick = System.currentTimeMillis()
-                    delay(2200)
-                    continue
-                }
+        var composerPressed = false
+        var quietChecks = 0          // consecutive checks with files in chat and nothing left to press
+        suspend fun press(n: AccessibilityNodeInfo): Boolean {
+            if (!(clickNode(n) || tapNode(n))) return false
+            clicks++
+            lastClick = System.currentTimeMillis()
+            quietChecks = 0
+            delay(2000)
+            return true
+        }
+        while (System.currentTimeMillis() < end && clicks < 4) {
+            // 1) "Send to …?" dialog  2) preview screen's Send — these always come first
+            val confirm = findSend(pkg, SendKind.CONFIRM_DIALOG) ?: findSend(pkg, SendKind.PREVIEW)
+            if (confirm != null) {
+                if (press(confirm)) continue
             } else if (showsAnyText(pkg, fileNames)) {
+                // 3) the files are in the chat. Send a typed caption once if one is waiting, then stop.
+                val composer = if (captionTyped && !composerPressed) findSend(pkg, SendKind.COMPOSER) else null
+                if (composer != null) {
+                    composerPressed = true
+                    if (press(composer)) continue
+                }
                 quietChecks++
-                if (quietChecks >= 3) return SendResult(clicks, true, "")
+                if (quietChecks >= 2) return SendResult(clicks, true, "")
             } else {
                 quietChecks = 0
             }
-            if (clicks > 0 && System.currentTimeMillis() - lastClick > 8000) break
+            if (clicks > 0 && System.currentTimeMillis() - lastClick > 10_000) break
             delay(500)
         }
-        return SendResult(clicks, false, describeScreen(pkg))
+        val seen = showsAnyText(pkg, fileNames)
+        return SendResult(clicks, seen, if (seen) "" else describeScreen(pkg))
     }
 
     // ------------------------------------------------------------------ element capture

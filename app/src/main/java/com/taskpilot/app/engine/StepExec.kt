@@ -265,7 +265,7 @@ object StepExec {
         delay(1500)
         if (!step.b("autoSend", true)) return ok("Chat opened with ${rc.files.size} file(s) — waiting for you to press Send")
         val names = rc.files.flatMap { listOf(it.name, it.nameWithoutExtension) }.distinct()
-        val r = svc.sendAndConfirm(pkg, names)
+        val r = svc.sendAndConfirm(pkg, names, captionTyped = caption.isNotBlank())
         return when {
             r.seenInChat && r.clicks > 0 -> ok("Sent ${rc.files.size} file(s) to +$number — they're in the chat")
             r.seenInChat -> ok("Sent ${rc.files.size} file(s) to +$number — WhatsApp sent them, they're in the chat")
