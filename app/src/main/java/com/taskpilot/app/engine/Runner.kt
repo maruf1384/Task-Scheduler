@@ -32,6 +32,13 @@ data class RunState(
 /** Shared between the steps of one run (e.g. the files chosen by "Select files"). */
 class RunContext(val startMs: Long) {
     var files: List<File> = emptyList()
+    /** Set by "Edit a file" in fresh-copy mode: open [editedFile] wherever [editedFrom] is opened. */
+    var editedFrom: String? = null
+    var editedFile: File? = null
+    /** The app the run last opened (used to watch it for a crashed script). */
+    var lastPkg: String = ""
+    /** "▶ 4/10 · Wait for new files" — steps can add live info after it. */
+    var pillPrefix: String = ""
 }
 
 data class Outcome(val ok: Boolean, val message: String = "")
@@ -127,7 +134,8 @@ object Runner {
                     continue
                 }
                 _state.value = RunState(wf.id, wf.name, i, wf.steps.size, title, start)
-                svc.updateRunPill("▶ ${i + 1}/${wf.steps.size} · $title")
+                rc.pillPrefix = "▶ ${i + 1}/${wf.steps.size} · $title"
+                svc.updateRunPill(rc.pillPrefix)
                 val t0 = System.currentTimeMillis()
                 val out: Outcome = try {
                     withTimeoutOrNull(40 * 60_000L) { StepExec.run(ctx, svc, step, rc) }

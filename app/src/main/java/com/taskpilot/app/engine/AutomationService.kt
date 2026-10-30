@@ -233,6 +233,16 @@ class AutomationService : AccessibilityService() {
         return best
     }
 
+    /** Waits until [sel] is no longer on screen. */
+    suspend fun waitGone(sel: Selector, timeoutMs: Long): Boolean {
+        val end = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < end) {
+            delay(500)
+            if (find(sel) == null) return true
+        }
+        return false
+    }
+
     suspend fun waitFor(sel: Selector, timeoutMs: Long): AccessibilityNodeInfo? {
         val end = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < end) {
@@ -333,7 +343,7 @@ class AutomationService : AccessibilityService() {
             t == "$c" || d == "$c" || t.startsWith("$c\n") || t.startsWith("$c ")
     }
 
-    suspend fun enterPin(pin: String): Boolean {
+    suspend fun enterPin(pin: CharArray): Boolean {
         val end = System.currentTimeMillis() + 7000
         while (System.currentTimeMillis() < end && findFirst(null) { isDigitKey(it, '5') } == null) delay(300)
         for (c in pin) {
@@ -420,6 +430,42 @@ class AutomationService : AccessibilityService() {
             }
         }
         return if (parts.isEmpty()) "nothing tappable found" else parts.joinToString(", ")
+    }
+
+    /** Every visible text / description inside [pkg], top to bottom. */
+    fun screenTexts(pkg: String, max: Int = 400): List<String> {
+        val out = ArrayList<String>()
+        for (r in roots(pkg)) {
+            walk(r, 0) { n, _ ->
+                if (out.size >= max || !n.isVisibleToUser) return@walk
+                val t = txt(n)
+                if (t.isNotBlank()) out += t
+                val d = dsc(n)
+                if (d.isNotBlank() && d != t) out += d
+            }
+        }
+        return out
+    }
+
+    /** Is a file called [fileName] shown in [pkg]? Accepts titles shortened with "…". */
+    fun showsFileName(pkg: String, fileName: String): Boolean {
+        val full = fileName.lowercase()
+        val stem = full.substringBeforeLast('.')
+        return screenTexts(pkg).any { raw ->
+            val t = raw.lowercase().trim()
+            if (t.contains(full) || (stem.length >= 6 && t.contains(stem))) return@any true
+            val cut = t.trimEnd('…', '.', ' ')
+            cut.length >= 10 && t.length != cut.length && full.startsWith(cut)
+        }
+    }
+
+    suspend fun waitForFileName(pkg: String, fileName: String, timeoutMs: Long): Boolean {
+        val end = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < end) {
+            if (showsFileName(pkg, fileName)) return true
+            delay(600)
+        }
+        return false
     }
 
     data class SendResult(val clicks: Int, val seenInChat: Boolean, val screen: String)

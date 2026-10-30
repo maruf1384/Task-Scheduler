@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import com.taskpilot.app.data.EditParams
 import com.taskpilot.app.data.Phone
 import com.taskpilot.app.data.Selector
 import com.taskpilot.app.data.Step
@@ -14,10 +15,12 @@ import com.taskpilot.app.ui.WakeActivity
 import kotlinx.coroutines.delay
 import java.io.File
 import java.time.LocalDateTime
+import java.util.Arrays
 import java.time.format.DateTimeFormatter
 
 /** What each kind of step actually does. */
 object StepExec {
+    private const val PYDROID = "ru.iiec.pydroid3"
 
     private fun ok(msg: String = "") = Outcome(true, msg)
     private fun fail(msg: String) = Outcome(false, msg)
@@ -39,9 +42,10 @@ object StepExec {
 
     suspend fun run(ctx: Context, svc: AutomationService, step: Step, rc: RunContext): Outcome = when (step.type) {
         StepType.WAKE_UNLOCK -> wakeUnlock(ctx, svc, step)
-        StepType.LAUNCH_APP -> launchApp(ctx, svc, step)
-        StepType.OPEN_FILE -> openFile(ctx, svc, step)
+        StepType.LAUNCH_APP -> launchApp(ctx, svc, step, rc)
+        StepType.OPEN_FILE -> openFile(ctx, svc, step, rc)
         StepType.TAP_ELEMENT -> tapElement(svc, step)
+        StepType.EDIT_FILE -> editFile(ctx, step, rc)
         StepType.WAIT_ELEMENT -> waitElement(svc, step)
         StepType.INPUT_TEXT -> inputText(svc, step, rc)
         StepType.SYSTEM_KEY -> {
@@ -53,7 +57,7 @@ object StepExec {
             delay(s * 1000L)
             ok("Waited ${s}s")
         }
-        StepType.WAIT_NEW_FILES -> waitNewFiles(step, rc)
+        StepType.WAIT_NEW_FILES -> waitNewFiles(svc, step, rc)
         StepType.SELECT_FILES -> selectFiles(step, rc)
         StepType.SEND_WHATSAPP -> sendWhatsApp(ctx, svc, step, rc)
         StepType.SHARE_FILES -> shareFiles(ctx, svc, step, rc)
@@ -76,42 +80,60 @@ object StepExec {
         svc.startActivity(Intent(ctx, WakeActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION))
         delay(1600)
         if (!km.isKeyguardLocked) return ok("Screen on and unlocked")
-        val pin = step.s("pin").filter { it.isDigit() }
-        if (pin.isNotEmpty()) {
-            if (!svc.enterPin(pin)) return fail("Couldn't find the PIN keypad on the lock screen")
+        if (step.b("usePin", false)) {
+            val pin = SecretStore.readPin(ctx)
+                ?: return fail("No PIN is saved on this phone — open this step and tap “Save PIN”.")
+            try {
+                if (!svc.enterPin(pin)) return fail("Couldn't find the PIN keypad on the lock screen")
+            } finally {
+                Arrays.fill(pin, '\u0000')
+            }
             for (k in 0 until 10) {
                 delay(400)
-                if (!km.isKeyguardLocked) return ok("Unlocked with your PIN")
+                if (!km.isKeyguardLocked) return ok("Unlocked with your saved PIN")
             }
-            return fail("The saved PIN didn't unlock the phone")
+            return fail("The saved PIN didn't unlock the phone — save it again in this step")
         }
         return if (step.b("strict", true)) {
             fail("Phone is locked with a PIN or pattern. Save your PIN in this step, or switch the screen lock to Swipe/None.")
         } else ok("Screen on (still locked)")
     }
 
-    private suspend fun launchApp(ctx: Context, svc: AutomationService, step: Step): Outcome {
+    private suspend fun launchApp(ctx: Context, svc: AutomationService, step: Step, rc: RunContext): Outcome {
         val pkg = step.s("pkg")
         if (pkg.isBlank()) return fail("Choose an app")
+        rc.lastPkg = pkg
         val i = ctx.packageManager.getLaunchIntentForPackage(pkg) ?: return fail("${step.s("appName", pkg)} isn't installed")
         svc.startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         return if (svc.waitForPackage(pkg, 15_000)) { delay(800); ok("Opened ${step.s("appName", pkg)}") }
         else fail("${step.s("appName", pkg)} didn't come to the front")
     }
 
-    private suspend fun openFile(ctx: Context, svc: AutomationService, step: Step): Outcome {
-        val f = File(step.s("path"))
+    private fun viewIntent(uri: Uri, mime: String, pkg: String): Intent {
+        val i = Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime).addFlags(
+            Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+        )
+        if (pkg.isNotBlank()) i.setPackage(pkg)
+        return i
+    }
+
+    private suspend fun openFile(ctx: Context, svc: AutomationService, step: Step, rc: RunContext): Outcome {
         if (step.s("path").isBlank()) return fail("Choose a file")
+        val chosenFile = File(step.s("path"))
+        // An earlier "Edit a file" step made a fresh copy of this file → open that copy instead.
+        val useCopy = rc.editedFrom == chosenFile.absolutePath && rc.editedFile != null
+        val f = if (useCopy) rc.editedFile!! else chosenFile
         if (!f.exists()) return fail("File not found: ${FileOps.pretty(f.absolutePath)}")
         val pkg = step.s("pkg")
         val app = step.s("appName", pkg.ifBlank { "the app" })
         if (pkg.isNotBlank() && !installed(ctx, pkg)) return fail("$app isn't installed")
+        if (pkg.isNotBlank()) rc.lastPkg = pkg
         // Try the chosen link type first, then automatically fall back to the other one:
         // some apps (e.g. Pydroid 3 builds) accept only a real file path, others only a content link.
         val chosen = step.s("uriMode", "file")
         val modes = if (chosen == "file") listOf("file", "content") else listOf("content", "file")
         val mimes = listOf(FileOps.mime(f), "text/plain", "*/*").distinct()
-        var opened = false
+        var working: Intent? = null
         outer@ for (mode in modes) {
             val uri: Uri = try {
                 if (mode == "file") Uri.fromFile(f) else FileOps.uriFor(ctx, f)
@@ -119,26 +141,40 @@ object StepExec {
                 continue@outer
             }
             for (m in mimes) {
-                val i = Intent(Intent.ACTION_VIEW).setDataAndType(uri, m).addFlags(
-                    Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
-                )
-                if (pkg.isNotBlank()) i.setPackage(pkg)
+                val i = viewIntent(uri, m, pkg)
                 try {
                     svc.startActivity(i)
-                    opened = true
+                    working = i
                     break@outer
                 } catch (_: Exception) {
                     // ActivityNotFoundException, SecurityException, FileUriExposedException… try the next mime/mode.
                 }
             }
         }
-        if (!opened) return fail(
+        if (working == null) return fail(
             "$app wouldn't open .${f.extension} from another app. Open $app yourself and load the file there, " +
                 "or use an “Open app” step followed by on-screen taps.",
         )
-        if (pkg.isNotBlank() && !svc.waitForPackage(pkg, 15_000)) return fail("$app didn't open")
-        delay(1000)
-        return ok("Opened ${f.name} in $app")
+        if (pkg.isNotBlank() && !svc.waitForPackage(pkg, 20_000)) return fail("$app didn't open")
+        val label = if (useCopy) "the edited copy of ${chosenFile.name}" else f.name
+        if (pkg.isBlank() || !step.b("verify", true)) {
+            delay(1200)
+            return ok("Opened $label in $app")
+        }
+        // A cold-starting app (e.g. Pydroid after the phone closed it overnight) can swallow the
+        // first request and just show its last screen. Check the file is really there; if not, ask again.
+        if (svc.waitForFileName(pkg, f.name, 10_000)) {
+            delay(800)
+            return ok("Opened $label in $app — checked it's on screen")
+        }
+        try { svc.startActivity(working) } catch (_: Exception) {}
+        svc.waitForPackage(pkg, 10_000)
+        if (svc.waitForFileName(pkg, f.name, 12_000)) {
+            delay(800)
+            return ok("Opened $label in $app on the 2nd try — checked it's on screen")
+        }
+        delay(800)
+        return ok("Opened $label in $app (couldn't see the file name on screen to double-check)")
     }
 
     private suspend fun tapElement(svc: AutomationService, step: Step): Outcome {
@@ -152,8 +188,19 @@ object StepExec {
             val n = svc.waitFor(sel, timeout)
             if (n != null) {
                 val done = svc.clickNode(n, long) || svc.tapNode(n, long)
-                delay(600)
-                return if (done) ok("Tapped “$name”") else fail("Found “$name” but couldn't tap it")
+                if (!done) return fail("Found “$name” but couldn't tap it")
+                if (!step.b("verify", sel.pkg == PYDROID)) {
+                    delay(600)
+                    return ok("Tapped “$name”")
+                }
+                // Make sure the tap did something: the button should leave the screen (e.g. Pydroid
+                // switches to its terminal after Run). If it's still there, tap exactly once more.
+                if (svc.waitGone(sel, 6000)) return ok("Tapped “$name” — the screen changed")
+                val again = svc.find(sel)
+                if (again != null && (svc.clickNode(again, long) || svc.tapNode(again, long)) && svc.waitGone(sel, 6000)) {
+                    return ok("Tapped “$name” (needed a 2nd tap) — the screen changed")
+                }
+                return fail("Tapped “$name” but nothing happened — it's still on screen")
             }
             if (!step.b("coords", true) || !sel.hasPoint) return fail("Couldn't find “$name” within ${timeout / 1000}s")
         } else {
@@ -186,21 +233,35 @@ object StepExec {
         else fail("That box doesn't accept text")
     }
 
-    private suspend fun waitNewFiles(step: Step, rc: RunContext): Outcome {
+    private val ERROR_LINE = Regex("""^\s*[A-Za-z_.]*(Error|Exception|Interrupt|Exit)\b.*:.*""")
+
+    private fun fmtLeft(ms: Long): String {
+        val s = (ms / 1000).coerceAtLeast(0)
+        return "%d:%02d left".format(s / 60, s % 60)
+    }
+
+    private suspend fun waitNewFiles(svc: AutomationService, step: Step, rc: RunContext): Outcome {
         val folder = File(step.s("folder"))
         if (!folder.isDirectory) return fail("Folder not found: ${FileOps.pretty(folder.absolutePath)}")
         val exts = FileOps.parseExts(step.s("ext"))
         val timeout = step.i("timeout", 600).coerceAtLeast(5) * 1000L
         val settle = step.i("settle", 6).coerceAtLeast(1) * 1000L
+        val watchPkg = step.s("watchPkg").ifBlank { rc.lastPkg }
+        val stopEarly = step.b("stopEarly", true) && watchPkg.isNotBlank()
         val since = rc.startMs - 2000
         val end = System.currentTimeMillis() + timeout
         var lastSig = ""
         var stableSince = 0L
+        var lastPill = 0L
+        var lastWatch = 0L
+        var endedAt = 0L               // when the app showed the script had finished / crashed
+        var endedHow = ""
+        var errorLine = ""
         while (System.currentTimeMillis() < end) {
+            val now = System.currentTimeMillis()
             val found = FileOps.scanNew(folder, since, exts, step.b("recursive", true))
             if (found.isNotEmpty()) {
                 val sig = found.joinToString("|") { "${it.path}:${it.length()}:${it.lastModified()}" }
-                val now = System.currentTimeMillis()
                 if (sig != lastSig) {
                     lastSig = sig
                     stableSince = now
@@ -208,10 +269,73 @@ object StepExec {
                     rc.files = found
                     return ok("${found.size} new file(s): ${found.joinToString(", ") { it.name }}")
                 }
+            } else if (stopEarly && now - lastWatch >= 3000) {
+                lastWatch = now
+                // Pydroid prints "[Program finished]" when a script ends, and a Traceback when it crashes.
+                val lines = svc.screenTexts(watchPkg).flatMap { it.split('\n') }.map { it.trim() }
+                val crashed = lines.any { it.startsWith("Traceback (most recent call last)") }
+                val finished = lines.any { it.contains("[Program finished]") }
+                if ((crashed || finished) && endedAt == 0L) {
+                    endedAt = now
+                    endedHow = if (crashed) "crashed" else "finished"
+                    errorLine = lines.lastOrNull { ERROR_LINE.matches(it) }?.take(220) ?: ""
+                }
+                // Give a just-finished script 12 s to flush its files before giving up.
+                if (endedAt != 0L && now - endedAt > 12_000) {
+                    val why = if (errorLine.isNotBlank()) " Error: $errorLine" else ""
+                    return fail("The script $endedHow without making new files in ${folder.name}.$why")
+                }
+            }
+            if (now - lastPill >= 5000 && rc.pillPrefix.isNotBlank()) {
+                lastPill = now
+                svc.updateRunPill("${rc.pillPrefix} · ${fmtLeft(end - now)}")
             }
             delay(1500)
         }
-        return fail("No new files appeared within ${timeout / 1000}s")
+        return fail("No new files appeared within ${timeout / 60_000} min ${(timeout / 1000) % 60} s")
+    }
+
+    // ------------------------------------------------------------------ Edit a file
+
+    private fun editFile(ctx: Context, step: Step, rc: RunContext): Outcome {
+        val path = step.s("path")
+        if (path.isBlank()) return fail("Choose a file")
+        val orig = File(path)
+        if (!orig.isFile) return fail("File not found: ${FileOps.pretty(orig.absolutePath)}")
+        if (orig.length() > 5_000_000) return fail("${orig.name} is too big to edit (over 5 MB)")
+        val edits = EditParams.edits(step)
+        if (edits.isEmpty()) return fail("No changes set up in this step")
+        val text = try { orig.readText(Charsets.UTF_8) } catch (e: Exception) { return fail("Couldn't read ${orig.name}: ${e.message}") }
+        val now = LocalDateTime.now()
+        val r = CodeEdit.apply(text, edits, now, EditParams.weekStart(step))
+        // Any problem = stop. Running the script with half-changed settings could send a wrong report.
+        if (r.problems.isNotEmpty()) return fail(r.problems.joinToString("; "))
+        return try {
+            if (step.s("save", "copy") == "copy") {
+                val copy = CodeEdit.copyFor(orig, now)
+                CodeEdit.writeAtomic(copy, r.text)
+                CodeEdit.cleanCopies(orig, keep = 3)
+                rc.editedFrom = orig.absolutePath
+                rc.editedFile = copy
+                ok(r.changes.joinToString("; ") + " · saved as a fresh copy (${copy.name}); the original is unchanged")
+            } else {
+                backup(ctx, orig, text)
+                CodeEdit.writeAtomic(orig, r.text)
+                rc.editedFrom = null
+                rc.editedFile = null
+                ok(r.changes.joinToString("; ") + " · saved into ${orig.name}")
+            }
+        } catch (e: Exception) {
+            fail("Couldn't save the change: ${e.message}")
+        }
+    }
+
+    /** Keeps the last 5 versions of a file that was edited in place, inside the app's own folder. */
+    private fun backup(ctx: Context, orig: File, text: String) {
+        val dir = File(ctx.filesDir, "edit-backups").apply { mkdirs() }
+        val stamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"))
+        File(dir, "${orig.name}.$stamp").writeText(text, Charsets.UTF_8)
+        dir.listFiles()?.filter { it.name.startsWith(orig.name + ".") }?.sortedByDescending { it.name }?.drop(5)?.forEach { it.delete() }
     }
 
     private fun selectFiles(step: Step, rc: RunContext): Outcome {

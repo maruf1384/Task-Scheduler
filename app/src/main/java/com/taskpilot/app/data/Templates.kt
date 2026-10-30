@@ -1,6 +1,7 @@
 package com.taskpilot.app.data
 
 import android.content.Context
+import com.taskpilot.app.engine.FileEdit
 import android.os.Environment
 import java.io.File
 
@@ -21,6 +22,7 @@ object Templates {
             schedule = Schedule(enabled = false, hour = 0, minute = 40),
             steps = listOf(
                 Step(type = StepType.WAKE_UNLOCK),
+                weeklyDatesStep(script),
                 Step(
                     type = StepType.OPEN_FILE,
                     p = mapOf("path" to script, "pkg" to PYDROID, "appName" to "Pydroid 3", "uriMode" to "file"),
@@ -29,12 +31,12 @@ object Templates {
                 Step(
                     type = StepType.TAP_ELEMENT,
                     label = "Press Run in Pydroid",
-                    p = mapOf(Selector.PKG to PYDROID, "pkg" to PYDROID, "appName" to "Pydroid 3", "timeout" to "20"),
+                    p = mapOf(Selector.PKG to PYDROID, "pkg" to PYDROID, "appName" to "Pydroid 3", "timeout" to "25", "verify" to "true"),
                 ),
                 Step(
                     type = StepType.WAIT_NEW_FILES,
                     label = "Wait for the report files",
-                    p = mapOf("folder" to folder, "timeout" to "900", "settle" to "8", "ext" to "xlsx"),
+                    p = mapOf("folder" to folder, "timeout" to "600", "settle" to "8", "ext" to "xlsx", "stopEarly" to "true"),
                 ),
                 Step(
                     type = StepType.SELECT_FILES,
@@ -50,6 +52,20 @@ object Templates {
             ),
         )
     }
+
+    /** "Edit a file": set START/END to last week (Sun–Sat) in a fresh copy that Pydroid then opens. */
+    fun weeklyDatesStep(script: String, names: Pair<String, String> = "START_DATETIME" to "END_DATETIME"): Step =
+        EditParams.withEdits(
+            Step(
+                type = StepType.EDIT_FILE,
+                label = "Set the dates to last week",
+                p = mapOf("path" to script, "save" to "copy", "weekStart" to "7"),
+            ),
+            listOf(
+                FileEdit("var", names.first, "{lastweek.start} 00:00"),
+                FileEdit("var", names.second, "{lastweek.end} 23:59"),
+            ),
+        )
 
     fun seedIfNeeded(ctx: Context) {
         if (Repo.flag(ctx, "seeded")) return

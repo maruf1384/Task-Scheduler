@@ -199,9 +199,8 @@ fun StepEditorScreen(s: Screen.StepEdit, nav: Nav) {
             when (draft.type) {
                 StepType.WAKE_UNLOCK -> {
                     SectionLabel("Lock screen")
-                    Hint("Turns the screen on and opens the lock screen. Swipe locks open by themselves. For a PIN lock, save the PIN below — it is kept only inside this app on this phone. Pattern locks can't be opened automatically.")
-                    Field(draft, "pin", "PIN (optional)", { draft = it }, keyboard = KeyboardType.NumberPassword, password = true,
-                        support = "Digits only. Leave empty if you use Swipe/None.")
+                    Hint("Turns the screen on and opens the lock screen. Swipe locks open by themselves. For a PIN lock, save your PIN below. Pattern locks can't be opened automatically.")
+                    PinSection(draft) { draft = it }
                     SwitchRow("Stop if still locked", "If off, the run continues even when the phone stays locked", draft.b("strict", true)) {
                         draft = draft.put("strict", it.toString())
                     }
@@ -225,6 +224,13 @@ fun StepEditorScreen(s: Screen.StepEdit, nav: Nav) {
                         ),
                         draft.s("uriMode", "file"),
                     ) { draft = draft.put("uriMode", it) }
+                    SectionLabel("Options")
+                    SwitchRow(
+                        "Check the file really opened",
+                        "Looks for the file name in the app; if the app ignored the request (e.g. it was still starting up), asks it again",
+                        draft.b("verify", true),
+                    ) { draft = draft.put("verify", it.toString()) }
+                    Hint("If an “Edit a file” step before this one saves a fresh copy of this file, the edited copy is opened automatically.")
                 }
 
                 StepType.TAP_ELEMENT, StepType.WAIT_ELEMENT, StepType.INPUT_TEXT -> {
@@ -245,6 +251,11 @@ fun StepEditorScreen(s: Screen.StepEdit, nav: Nav) {
                         StepType.TAP_ELEMENT -> {
                             Field(draft, "timeout", "Wait up to (seconds) for it to appear", { draft = it }, keyboard = KeyboardType.Number)
                             SwitchRow("Long press", null, draft.b("long", false)) { draft = draft.put("long", it.toString()) }
+                            SwitchRow(
+                                "Make sure the tap worked",
+                                "Checks the button goes away afterwards (e.g. Pydroid opens its terminal after Run). If not, taps once more, then stops the run with a clear message",
+                                draft.b("verify", Selector.from(draft).pkg == "ru.iiec.pydroid3"),
+                            ) { draft = draft.put("verify", it.toString()) }
                             SwitchRow("Fall back to the saved position", "If the button can't be recognised, tap where it was when you picked it", draft.b("coords", true)) {
                                 draft = draft.put("coords", it.toString())
                             }
@@ -292,7 +303,16 @@ fun StepEditorScreen(s: Screen.StepEdit, nav: Nav) {
                         support = "Now: ${StepCatalog.fmtSecs(draft.i("timeout", 600))}")
                     Field(draft, "settle", "Files must stay unchanged for (seconds)", { draft = it }, keyboard = KeyboardType.Number,
                         support = "Makes sure every file is completely written before moving on")
+                    SwitchRow(
+                        "Stop early if the script crashes",
+                        "Watches the app that was opened (e.g. Pydroid) for “Traceback” or “[Program finished]” and ends the wait right away — with the Python error in History — instead of waiting the full time",
+                        draft.b("stopEarly", true),
+                    ) { draft = draft.put("stopEarly", it.toString()) }
                     Hint("The files found here are also remembered for a following “Send” step.")
+                }
+
+                StepType.EDIT_FILE -> {
+                    EditFileSection(draft, wf, onChange = { draft = it }, onPickFile = { openPicker(Picker.FILE, "path") })
                 }
 
                 StepType.SELECT_FILES -> {
@@ -471,7 +491,7 @@ fun StepEditorScreen(s: Screen.StepEdit, nav: Nav) {
 // ============================================================ form pieces
 
 @Composable
-private fun Hint(text: String) {
+internal fun Hint(text: String) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -487,7 +507,7 @@ private fun Hint(text: String) {
 }
 
 @Composable
-private fun Field(
+internal fun Field(
     step: Step,
     key: String,
     label: String,
@@ -513,7 +533,7 @@ private fun Field(
 }
 
 @Composable
-private fun Choice(options: List<Pair<String, Pair<String, String>>>, selected: String, onSelect: (String) -> Unit) {
+internal fun Choice(options: List<Pair<String, Pair<String, String>>>, selected: String, onSelect: (String) -> Unit) {
     Card(
         shape = MaterialTheme.shapes.medium,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
@@ -554,7 +574,7 @@ private fun QuickPicks(values: List<Int>, onPick: (Int) -> Unit) {
 }
 
 @Composable
-private fun PathCard(path: String, isFile: Boolean, onBrowse: () -> Unit) {
+internal fun PathCard(path: String, isFile: Boolean, onBrowse: () -> Unit) {
     val exists = path.isNotBlank() && java.io.File(path).exists()
     Card(
         onClick = onBrowse,

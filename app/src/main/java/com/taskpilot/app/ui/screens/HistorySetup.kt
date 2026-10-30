@@ -37,6 +37,8 @@ import androidx.compose.material.icons.rounded.RemoveCircleOutline
 import androidx.compose.material.icons.rounded.RocketLaunch
 import androidx.compose.material.icons.rounded.SdStorage
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.SystemUpdate
+import kotlinx.coroutines.launch
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -238,6 +240,7 @@ fun SetupTab() {
                 )
             }
         }
+        item { UpdateCard(ctx, tick) }
         item {
             PermCard(Icons.Rounded.Accessibility, "Accessibility service",
                 "Lets TaskPilot tap Run in Pydroid and Send in WhatsApp. It stays idle except during a run.",
@@ -276,7 +279,7 @@ fun SetupTab() {
                 Icons.Rounded.Lock,
                 if (secure) "Your phone has a PIN / pattern lock" else "Screen lock",
                 if (secure)
-                    "Android doesn't let apps get past a secure lock. For night runs either save your PIN in the “Wake & unlock” step (PIN only, stored only in this app), or set Screen lock to Swipe."
+                    "Android doesn't let apps get past a secure lock. For night runs either save your PIN in the “Wake & unlock” step (encrypted with a key locked in the phone's security chip — it never leaves the phone), or set Screen lock to Swipe."
                 else
                     "No secure lock detected — “Wake & unlock” can open the phone by itself.",
                 if (secure) Warn else Success,
@@ -408,3 +411,93 @@ private fun InfoCard(icon: ImageVector, title: String, text: String, tint: Color
     }
 }
 
+
+// ============================================================ Updates (keep permissions)
+
+@Composable
+private fun UpdateCard(ctx: Context, tick: Int) {
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val (installedName, installedCode) = remember { com.taskpilot.app.engine.Updater.currentVersion(ctx) }
+    var found by remember { mutableStateOf<List<com.taskpilot.app.engine.Updater.Candidate>>(emptyList()) }
+    var busy by remember { mutableStateOf(false) }
+    var status by remember { mutableStateOf<String?>(null) }
+    var pick by remember { mutableStateOf(false) }
+    androidx.compose.runtime.LaunchedEffect(tick) {
+        found = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            if (Perms.allFiles(ctx)) com.taskpilot.app.engine.Updater.findInDownloads(ctx) else emptyList()
+        }
+    }
+    val newer = found.firstOrNull { it.versionCode > installedCode }
+
+    fun install(c: com.taskpilot.app.engine.Updater.Candidate) {
+        if (!com.taskpilot.app.engine.Updater.canInstall(ctx)) {
+            open(ctx, com.taskpilot.app.engine.Updater.allowInstallIntent(ctx))
+            status = "Turn on “Allow from this source” for TaskPilot, come back, and tap Install again. (Only needed once.)"
+            return
+        }
+        busy = true
+        status = "Preparing ${c.file.name}…"
+        scope.launch {
+            val err = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { com.taskpilot.app.engine.Updater.install(ctx, c) }
+            busy = false
+            status = err ?: "Android will now ask you to confirm the update. TaskPilot closes and reopens with everything kept."
+        }
+    }
+
+    Card(
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(
+            containerColor = if (newer != null) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
+        ),
+    ) {
+        Column(Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconBadge(Icons.Rounded.SystemUpdate, MaterialTheme.colorScheme.primary, 44.dp)
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("App updates", style = MaterialTheme.typography.titleMedium)
+                    Text("Installed: version $installedName", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            Text(
+                "Always update from here. Then Android treats TaskPilot like a store app and keeps the Accessibility permission — no more “Restricted setting” after an update.",
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+            Spacer(Modifier.height(10.dp))
+            if (newer != null) {
+                Text("Found ${newer.file.name} · version ${newer.versionName}", style = MaterialTheme.typography.labelLarge)
+                Spacer(Modifier.height(6.dp))
+                androidx.compose.material3.Button(onClick = { install(newer) }, enabled = !busy) {
+                    Text("Install version ${newer.versionName}")
+                }
+            } else {
+                Text(
+                    "No newer TaskPilot APK in Download. Download the new APK in your browser (don't open it), then come back here.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            TextButton(onClick = { pick = true }, contentPadding = PaddingValues(0.dp)) { Text("Choose an APK file…") }
+            status?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+            }
+        }
+    }
+
+    if (pick) {
+        FileBrowserDialog(
+            start = java.io.File(com.taskpilot.app.engine.FileOps.root, "Download").absolutePath,
+            pickFile = true,
+            onDismiss = { pick = false },
+        ) { path ->
+            pick = false
+            val c = com.taskpilot.app.engine.Updater.inspect(ctx, java.io.File(path))
+            when {
+                c == null -> status = "That file isn't a TaskPilot APK."
+                c.versionCode < installedCode -> status = "That's an older version (${c.versionName}) — Android won't install it over $installedName."
+                else -> install(c)
+            }
+        }
+    }
+}

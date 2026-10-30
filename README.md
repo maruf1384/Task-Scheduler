@@ -38,7 +38,11 @@ Set the time (default 12:40 AM) and days in the Schedule card, then switch it on
 4. **No battery restriction** — on Realme/OPPO also enable *Allow auto-launch*.
 5. **Notifications**
 
-**Screen lock:** Android never lets apps bypass a PIN/pattern. For night runs, either save your **PIN** in the *Wake & unlock* step (kept only inside the app), or use Swipe/None.
+**Screen lock:** Android never lets apps bypass a PIN/pattern. For night runs, either save your **PIN** in the *Wake & unlock* step, or use Swipe/None. The PIN is encrypted (AES-256-GCM) with a key generated inside the phone's secure hardware (Android Keystore/StrongBox) — it's never shown again, never part of an automation, History or the APK, and backups / phone-to-phone transfer are disabled for the whole app.
+
+**Updating without losing Accessibility:** download the new APK (don't open it), then *Setup → App updates → Install*. TaskPilot installs it through Android's installer-session API (the way app stores do), so Android doesn't re-apply “Restricted setting”. The very first switch to this method (installing 1.2.0 itself) still has to be done the old way.
+
+**Edit a file:** change settings in a script before it runs — pick `START_DATETIME`, set it to `{lastweek.start} 00:00`. Smart dates: `{today}`, `{yesterday}`, `{week.start}`, `{week.end}`, `{lastweek.start}`, `{lastweek.end}`, `{month.start}`, `{lastmonth.end}`, offsets like `{today-7}`, formats like `{lastweek.start|dd-MM-yyyy}`. “Fresh copy” mode writes a hidden copy next to the script and the following *Open file* step opens it, so Pydroid always runs exactly the edited code.
 
 ## Picking a button (the “branch → sub-branch” flow)
 

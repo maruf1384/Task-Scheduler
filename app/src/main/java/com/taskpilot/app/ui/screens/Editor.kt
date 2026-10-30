@@ -89,7 +89,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.taskpilot.app.data.EditParams
 import com.taskpilot.app.data.Repo
+import com.taskpilot.app.data.Templates
+import com.taskpilot.app.engine.CodeEdit
 import com.taskpilot.app.data.Step
 import com.taskpilot.app.data.StepType
 import com.taskpilot.app.data.Workflow
@@ -222,6 +225,22 @@ fun EditorScreen(wfId: String, nav: Nav) {
         ) {
             item(key = "schedule") {
                 ScheduleCard(wf, onChange = { save(it) }, onPickTime = { showTime = true })
+            }
+            suggestDatesStep(wf)?.let { (openIndex, script) ->
+                item(key = "suggestEdit") {
+                    SuggestEditCard(script) {
+                        val st = Templates.weeklyDatesStep(script.absolutePath).let { s ->
+                            val names = try {
+                                CodeEdit.assignments(script.readText()).map { it.name }
+                            } catch (_: Exception) { emptyList() }
+                            if ("START_DATETIME" in names && "END_DATETIME" in names) s
+                            else EditParams.withEdits(s.copy(label = ""), emptyList())
+                        }
+                        val list = wf.steps.toMutableList().apply { add(openIndex, st) }
+                        save(wf.copy(steps = list))
+                        nav.push(Screen.StepEdit(wf.id, st.id, null, openIndex))
+                    }
+                }
             }
             item(key = "stepsLabel") {
                 SectionLabel("Steps · ${wf.steps.size}") {
@@ -620,4 +639,34 @@ private fun TimeDialog(h: Int, m: Int, onDismiss: () -> Unit, onPick: (Int, Int)
         confirmButton = { TextButton(onClick = { onPick(st.hour, st.minute) }) { Text("Set") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
+}
+
+/** An "Open file" of a .py with no "Edit a file" for it yet → (where to insert, the script). */
+private fun suggestDatesStep(wf: Workflow): Pair<Int, java.io.File>? {
+    val i = wf.steps.indexOfFirst { it.type == StepType.OPEN_FILE && it.s("path").endsWith(".py", true) }
+    if (i < 0) return null
+    val path = wf.steps[i].s("path")
+    if (wf.steps.any { it.type == StepType.EDIT_FILE && it.s("path") == path }) return null
+    val f = java.io.File(path)
+    return if (f.isFile) i to f else null
+}
+
+@Composable
+private fun SuggestEditCard(script: java.io.File, onAdd: () -> Unit) {
+    Card(
+        modifier = Modifier.padding(top = 12.dp),
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Text("New: update the code before it runs", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
+            Text(
+                "Add an “Edit a file” step for ${script.name} — e.g. set START_DATETIME / END_DATETIME to last week automatically each time.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                modifier = Modifier.padding(top = 4.dp, bottom = 10.dp),
+            )
+            Button(onClick = onAdd) { Text("Add “Edit a file” step") }
+        }
+    }
 }
