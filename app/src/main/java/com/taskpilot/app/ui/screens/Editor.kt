@@ -138,6 +138,7 @@ fun EditorScreen(wfId: String, nav: Nav) {
     }
 
     var showAdd by remember { mutableStateOf<Int?>(null) } // insert position
+    var recordAt by remember { mutableStateOf<Int?>(null) } // "Build it in the real app" insert position
     var showRename by remember { mutableStateOf(false) }
     var showTime by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
@@ -327,11 +328,21 @@ fun EditorScreen(wfId: String, nav: Nav) {
     }
 
     showAdd?.let { pos ->
-        AddStepSheet(onDismiss = { showAdd = null }) { type ->
+        AddStepSheet(
+            onDismiss = { showAdd = null },
+            onRecord = { showAdd = null; recordAt = pos },
+        ) { type ->
             showAdd = null
             nav.push(Screen.StepEdit(wf.id, null, type, pos))
         }
     }
+    recordAt?.let { pos ->
+        AppPickerDialog(onDismiss = { recordAt = null }) { pkg, label ->
+            recordAt = null
+            startRecording(wf.id, pos, pkg, label)?.let(toast)
+        }
+    }
+    RecorderResultToast()
     if (showRename) RenameDialog(wf, onDismiss = { showRename = false }) { name, emoji ->
         showRename = false
         save(wf.copy(name = name, emoji = emoji))
@@ -522,7 +533,7 @@ private fun StepRow(
 /** Branch → sub-branch picker: categories expand into their actions. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AddStepSheet(onDismiss: () -> Unit, onPick: (StepType) -> Unit) {
+fun AddStepSheet(onDismiss: () -> Unit, onRecord: (() -> Unit)? = null, onPick: (StepType) -> Unit) {
     val state = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var open by remember { mutableStateOf<Category?>(Category.FILES) }
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = state) {
@@ -535,6 +546,13 @@ fun AddStepSheet(onDismiss: () -> Unit, onPick: (StepType) -> Unit) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(start = 4.dp, bottom = 12.dp),
                 )
+                if (onRecord != null) {
+                    BuildInAppCard(
+                        "Open Gmail, D-Nothi, Chrome or any app and pick from the options on its own screens — each choice becomes a step.",
+                        onRecord,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
             }
             items(Category.entries.toList(), key = { it.name }) { cat ->
                 val expanded = open == cat

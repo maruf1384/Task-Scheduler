@@ -81,6 +81,11 @@ object Runner {
             }
             return why
         }
+        if (Recorder.isActive && after == null) {
+            val why = "You were building in an app — tap Done on the floating bar first."
+            if (trigger == "Scheduled") Notifier.post(app, Notifier.CH_ALERTS, "${wf.emoji} ${wf.name} skipped", why)
+            return why
+        }
         if (isRunning) {
             if (trigger == "Scheduled") {
                 Notifier.post(app, Notifier.CH_ALERTS, "${wf.emoji} ${wf.name} skipped", "Another automation was still running.")

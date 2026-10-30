@@ -96,6 +96,8 @@ import java.util.UUID
 fun HomeScreen(nav: Nav) {
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var showNew by remember { mutableStateOf(false) }
+    var pickForBuild by remember { mutableStateOf(false) }
+    val homeToast = rememberToast()
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
@@ -125,7 +127,17 @@ fun HomeScreen(nav: Nav) {
             }
         }
     }
-    if (showNew) NewAutomationSheet(onDismiss = { showNew = false }) { wf ->
+    if (pickForBuild) {
+        AppPickerDialog(onDismiss = { pickForBuild = false }) { pkg, label ->
+            pickForBuild = false
+            val wf = Workflow(name = "$label automation", emoji = "🧭")
+            Repo.upsert(wf)
+            nav.push(Screen.Editor(wf.id))
+            startRecording(wf.id, 0, pkg, label)?.let(homeToast)
+        }
+    }
+    RecorderResultToast()
+    if (showNew) NewAutomationSheet(onDismiss = { showNew = false }, onBuildInApp = { showNew = false; pickForBuild = true }) { wf ->
         showNew = false
         Repo.upsert(wf)
         nav.push(Screen.Editor(wf.id))
@@ -368,7 +380,7 @@ private fun WorkflowCard(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun NewAutomationSheet(onDismiss: () -> Unit, onCreate: (Workflow) -> Unit) {
+private fun NewAutomationSheet(onDismiss: () -> Unit, onBuildInApp: () -> Unit, onCreate: (Workflow) -> Unit) {
     val state = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = state) {
         Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 32.dp)) {
@@ -376,6 +388,8 @@ private fun NewAutomationSheet(onDismiss: () -> Unit, onCreate: (Workflow) -> Un
             Spacer(Modifier.height(4.dp))
             Text("Start empty or from a ready-made recipe.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(16.dp))
+            BuildInAppCard("Choose an app — Gmail, D-Nothi, Chrome… — and pick from the options on its real screens. Each choice becomes a step.", onBuildInApp)
+            Spacer(Modifier.height(10.dp))
             BlankOrTemplateButtons(onCreate)
         }
     }

@@ -44,6 +44,18 @@ Set the time (default 12:40 AM) and days in the Schedule card, then switch it on
 
 **Edit a file:** change settings in a script before it runs — pick `START_DATETIME`, set it to `{lastweek.start} 00:00`. Smart dates: `{today}`, `{yesterday}`, `{week.start}`, `{week.end}`, `{lastweek.start}`, `{lastweek.end}`, `{month.start}`, `{lastmonth.end}`, offsets like `{today-7}`, formats like `{lastweek.start|dd-MM-yyyy}`. “Fresh copy” mode writes a hidden copy next to the script and the following *Open file* step opens it, so Pydroid always runs exactly the edited code.
 
+## Build it in the real app (any app: Gmail, D-Nothi, Chrome…)
+
+*New automation → Build it in the real app* (or *Add step → Build it in the real app*), then choose the app.
+TaskPilot opens it with a floating bar. **Options** lists everything on the current screen — buttons, text boxes,
+list items, switches, scroll areas (the one you select is outlined on the real screen). Pick one, then the action:
+*Tap · Long press · Type text · Wait for it · Scroll*. TaskPilot does it in the app, saves it as a step and lists the
+next screen's options — branch → sub-branch through the real app. Or turn on **Record my taps** and just use the app.
+**Done** adds the steps to the automation. Passwords are never recorded.
+
+New steps: **Open a web page** (Chrome or the default browser), **Send an email** (Gmail, with the selected files,
+Send pressed automatically), **Scroll**. Smart dates (`{lastweek.start|d MMM}` …) work in captions, subjects, messages and links.
+
 ## Picking a button (the “branch → sub-branch” flow)
 
 *Add step → On-screen actions → Tap a button → Pick on screen.*

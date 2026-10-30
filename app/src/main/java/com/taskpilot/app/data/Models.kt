@@ -23,6 +23,9 @@ enum class StepType {
     NOTIFY,
     LOCK_SCREEN,
     EDIT_FILE,
+    SCROLL,
+    OPEN_URL,
+    SEND_EMAIL,
 }
 
 /**

@@ -4,6 +4,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.EditNote
+import androidx.compose.material.icons.rounded.Email
+import androidx.compose.material.icons.rounded.Language
+import androidx.compose.material.icons.rounded.SwipeDown
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.HourglassEmpty
@@ -54,14 +57,17 @@ object StepCatalog {
         StepInfo(StepType.WAIT_NEW_FILES, "Wait for new files", "Wait until new files show up in a folder (e.g. a script's output) and stop changing.", Icons.Rounded.FolderOpen, Category.FILES),
 
         StepInfo(StepType.OPEN_FILE, "Open file in app", "Open a file with a chosen app — e.g. your .py script in Pydroid 3.", Icons.Rounded.Description, Category.APPS),
+        StepInfo(StepType.OPEN_URL, "Open a web page", "Open a link in Chrome or any browser — e.g. an ERP or D-Nothi page.", Icons.Rounded.Language, Category.APPS),
         StepInfo(StepType.LAUNCH_APP, "Open app", "Bring any installed app to the front.", Icons.Rounded.OpenInNew, Category.APPS),
 
         StepInfo(StepType.TAP_ELEMENT, "Tap a button", "Tap something on screen — Run, Undo, Redo, Send… You pick it from a live capture.", Icons.Rounded.TouchApp, Category.SCREEN),
         StepInfo(StepType.WAIT_ELEMENT, "Wait for something on screen", "Pause until a text or button appears (or disappears).", Icons.Rounded.Visibility, Category.SCREEN),
+        StepInfo(StepType.SCROLL, "Scroll", "Scroll a list or page up or down (e.g. to reach an item further down).", Icons.Rounded.SwipeDown, Category.SCREEN),
         StepInfo(StepType.INPUT_TEXT, "Type text", "Put text into a text box.", Icons.Rounded.Keyboard, Category.SCREEN),
         StepInfo(StepType.SYSTEM_KEY, "Press Back / Home / Recents", "Press one of the phone's navigation keys.", Icons.Rounded.Smartphone, Category.SCREEN),
 
         StepInfo(StepType.SEND_WHATSAPP, "Send to WhatsApp number", "Send the selected files straight to a WhatsApp chat and press Send.", Icons.Rounded.Send, Category.SEND),
+        StepInfo(StepType.SEND_EMAIL, "Send an email", "Gmail (or another mail app): to, subject, message and the selected files — sent automatically.", Icons.Rounded.Email, Category.SEND),
         StepInfo(StepType.SHARE_FILES, "Share files to an app", "Hand the selected files to Gmail, Drive, Telegram or any app.", Icons.Rounded.Share, Category.SEND),
 
         StepInfo(StepType.WAKE_UNLOCK, "Wake & unlock", "Turn the screen on and get past the lock screen.", Icons.Rounded.LockOpen, Category.DEVICE),
@@ -86,6 +92,9 @@ object StepCatalog {
         StepType.NOTIFY -> Step(type = t, p = mapOf("title" to "TaskPilot", "text" to "Done at {time}"))
         StepType.WAKE_UNLOCK -> Step(type = t, p = mapOf("strict" to "true"))
         StepType.EDIT_FILE -> Step(type = t, p = mapOf("save" to "copy", "weekStart" to "7", "edits" to "[]"))
+        StepType.SCROLL -> Step(type = t, p = mapOf("dir" to "down", "times" to "1", "timeout" to "15"))
+        StepType.OPEN_URL -> Step(type = t, p = mapOf("url" to "https://"))
+        StepType.SEND_EMAIL -> Step(type = t, p = mapOf("app" to "com.google.android.gm", "appName" to "Gmail", "attach" to "true", "autoSend" to "true"))
         else -> Step(type = t)
     }
 
@@ -122,6 +131,15 @@ object StepCatalog {
         StepType.SHARE_FILES -> step.s("appName").ifBlank { "Ask each time" }
         StepType.NOTIFY -> step.s("title").ifBlank { "Notification" }
         StepType.LOCK_SCREEN -> "Screen off"
+        StepType.SCROLL -> {
+            val sel = Selector.from(step)
+            "${if (step.s("dir") == "up") "Up" else "Down"} ×${step.i("times", 1)}" + if (sel.isEmpty) " · middle of the screen" else " · “${sel.label.ifBlank { "list" }}”"
+        }
+        StepType.OPEN_URL -> step.s("url").removePrefix("https://").removePrefix("http://").ifBlank { "Enter a link" } +
+            (step.s("appName").takeIf { it.isNotBlank() }?.let { " · $it" } ?: "")
+        StepType.SEND_EMAIL -> step.s("to").ifBlank { "Enter who to send to" } +
+            (step.s("subject").takeIf { it.isNotBlank() }?.let { " · “${it.take(30)}”" } ?: "") +
+            (if (step.b("attach", true)) " · with files" else "")
         StepType.EDIT_FILE -> {
             val e = EditParams.edits(step)
             when {
@@ -154,6 +172,8 @@ object StepCatalog {
             StepType.INPUT_TEXT -> if (step.s("text").isEmpty()) out += "Enter the text"
             StepType.WAIT_NEW_FILES, StepType.SELECT_FILES -> if (step.s("folder").isBlank()) out += "Choose a folder"
             StepType.SEND_WHATSAPP -> if (Phone.toInternational(step.s("phone")) == null) out += "Enter the phone number"
+            StepType.OPEN_URL -> if (!step.s("url").matches(Regex("(?i)^[a-z][a-z0-9+.-]*://.+"))) out += "Enter a full link (https://…)"
+            StepType.SEND_EMAIL -> if (step.s("to").isBlank()) out += "Enter who to send to"
             StepType.EDIT_FILE -> {
                 if (step.s("path").isBlank()) out += "Choose a file"
                 else if (EditParams.edits(step).isEmpty()) out += "Add a change"

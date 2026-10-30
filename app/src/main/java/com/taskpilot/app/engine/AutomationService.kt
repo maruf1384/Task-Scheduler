@@ -110,11 +110,15 @@ class AutomationService : AccessibilityService() {
         setActive(false)
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) { /* polled on demand — nothing to do */ }
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        // Runs read the screen on demand; only "Record my taps" listens to events.
+        if (event != null && Recorder.isActive) Recorder.onEvent(this, event)
+    }
 
     override fun onInterrupt() {}
 
     override fun onUnbind(intent: Intent?): Boolean {
+        Recorder.stop()
         instance = null
         connected.value = false
         return super.onUnbind(intent)
@@ -307,6 +311,40 @@ class AutomationService : AccessibilityService() {
         val sx = if (sel.screenW > 0) size.x.toFloat() / sel.screenW else 1f
         val sy = if (sel.screenH > 0) size.y.toFloat() / sel.screenH else 1f
         return sel.x * sx to sel.y * sy
+    }
+
+    /** Swipe gesture from (x1,y1) to (x2,y2). */
+    suspend fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, ms: Long = 350): Boolean = suspendCancellableCoroutine { cont ->
+        val path = Path().apply { moveTo(max(0f, x1), max(0f, y1)); lineTo(max(0f, x2), max(0f, y2)) }
+        val g = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, ms)).build()
+        val ok = dispatchGesture(g, object : AccessibilityService.GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription?) { if (cont.isActive) cont.resume(true) }
+            override fun onCancelled(gestureDescription: GestureDescription?) { if (cont.isActive) cont.resume(false) }
+        }, null)
+        if (!ok && cont.isActive) cont.resume(false)
+    }
+
+    /** Scrolls the list/page that contains [n] (the node itself or the nearest scrollable parent). */
+    suspend fun scrollNode(n: AccessibilityNodeInfo?, down: Boolean): Boolean {
+        var cur = n
+        var hops = 0
+        while (cur != null && hops < 8) {
+            if (cur.isScrollable) {
+                val act = if (down) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+                if (cur.performAction(act)) return true
+                break
+            }
+            cur = cur.parent
+            hops++
+        }
+        // Fallback: swipe inside the element (or the middle of the screen).
+        val r = Rect()
+        if (n != null) n.getBoundsInScreen(r)
+        if (r.isEmpty) { val s = screenSize(); r.set(0, s.y / 4, s.x, s.y * 3 / 4) }
+        val x = r.exactCenterX()
+        val top = r.top + r.height() * 0.25f
+        val bottom = r.top + r.height() * 0.75f
+        return if (down) swipe(x, bottom, x, top) else swipe(x, top, x, bottom)
     }
 
     fun setText(n: AccessibilityNodeInfo, value: String): Boolean {

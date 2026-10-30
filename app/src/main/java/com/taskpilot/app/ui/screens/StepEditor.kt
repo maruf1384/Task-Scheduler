@@ -311,6 +311,60 @@ fun StepEditorScreen(s: Screen.StepEdit, nav: Nav) {
                     Hint("The files found here are also remembered for a following “Send” step.")
                 }
 
+                StepType.SCROLL -> {
+                    SectionLabel("Which app")
+                    AppCard(draft.s("pkg"), draft.s("appName"), emptyText = "Any app") { openPicker(Picker.APP, "pkg") }
+                    SectionLabel("List or page to scroll (optional)")
+                    ElementCard(Selector.from(draft), onPick = { captureAsk = true }, onClear = {
+                        draft = draft.copy(p = draft.p - Selector.KEYS.toSet())
+                    })
+                    Hint("Leave it empty to scroll the middle of the screen.")
+                    SectionLabel("Direction")
+                    Choice(
+                        listOf("down" to ("Down" to "Show what's further down"), "up" to ("Up" to "Go back towards the top")),
+                        draft.s("dir", "down"),
+                    ) { draft = draft.put("dir", it) }
+                    Field(draft, "times", "How many times", { draft = it }, keyboard = KeyboardType.Number)
+                }
+
+                StepType.OPEN_URL -> {
+                    SectionLabel("Link")
+                    Field(draft, "url", "Web address", { draft = it }, keyboard = KeyboardType.Uri,
+                        support = "e.g. https://erp.powergrid.gov.bd/… — dates like {yesterday|dd-MM-yyyy} work too")
+                    SectionLabel("Open with")
+                    AppCard(draft.s("pkg"), draft.s("appName"), emptyText = "Default browser") { openPicker(Picker.APP, "pkg") }
+                    if (draft.s("pkg").isNotBlank()) TextButton(onClick = { draft = draft.copy(p = draft.p - setOf("pkg", "appName")) }) { Text("Use the default browser") }
+                }
+
+                StepType.SEND_EMAIL -> {
+                    SectionLabel("Email")
+                    Field(draft, "to", "To", { draft = it }, keyboard = KeyboardType.Email, support = "Several addresses: separate with commas")
+                    Field(draft, "cc", "Cc (optional)", { draft = it }, keyboard = KeyboardType.Email)
+                    Field(draft, "subject", "Subject", { draft = it }, support = "e.g. Weekly report {lastweek.start|d MMM}–{lastweek.end|d MMM yyyy}")
+                    OutlinedTextField(
+                        value = draft.s("body"),
+                        onValueChange = { draft = draft.put("body", it) },
+                        label = { Text("Message") },
+                        minLines = 3,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    )
+                    SectionLabel("Options")
+                    SwitchRow("Attach the selected files", "Files from the previous “Select files” / “Wait for new files” step", draft.b("attach", true)) {
+                        draft = draft.put("attach", it.toString())
+                    }
+                    SwitchRow("Press Send automatically", "Off = the email opens ready and you press Send", draft.b("autoSend", true)) {
+                        draft = draft.put("autoSend", it.toString())
+                    }
+                    SectionLabel("Mail app")
+                    Choice(
+                        listOf(
+                            "com.google.android.gm" to ("Gmail" to "Recommended — Send is pressed automatically"),
+                            "" to ("Ask which app" to "Android's chooser; you finish sending yourself"),
+                        ),
+                        draft.s("app", "com.google.android.gm"),
+                    ) { v -> draft = draft.putAll(mapOf("app" to v, "appName" to if (v.isBlank()) "" else "Gmail")).let { if (v.isBlank()) it.put("autoSend", "false") else it } }
+                }
+
                 StepType.EDIT_FILE -> {
                     EditFileSection(draft, wf, onChange = { draft = it }, onPickFile = { openPicker(Picker.FILE, "path") })
                 }
@@ -403,7 +457,7 @@ fun StepEditorScreen(s: Screen.StepEdit, nav: Nav) {
 
         Picker.APP -> AppPickerDialog(onDismiss = { picker = null }) { pkg, label ->
             draft = draft.putAll(mapOf(pickerKey to pkg, "appName" to label))
-            if (draft.type == StepType.TAP_ELEMENT || draft.type == StepType.WAIT_ELEMENT || draft.type == StepType.INPUT_TEXT) {
+            if (draft.type == StepType.TAP_ELEMENT || draft.type == StepType.WAIT_ELEMENT || draft.type == StepType.INPUT_TEXT || draft.type == StepType.SCROLL) {
                 draft = draft.put(Selector.PKG, pkg)
             }
             picker = null

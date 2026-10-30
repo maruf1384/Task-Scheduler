@@ -27,7 +27,7 @@ object StepExec {
 
     fun expand(s: String, rc: RunContext): String {
         val now = LocalDateTime.now()
-        return s.replace("{date}", now.format(DateTimeFormatter.ofPattern("dd MMM yyyy")))
+        return CodeEdit.expandDates(s, now, java.time.DayOfWeek.SUNDAY).replace("{date}", now.format(DateTimeFormatter.ofPattern("dd MMM yyyy")))
             .replace("{time}", now.format(DateTimeFormatter.ofPattern("h:mm a")))
             .replace("{count}", rc.files.size.toString())
             .replace("{files}", rc.files.joinToString(", ") { it.name })
@@ -46,6 +46,9 @@ object StepExec {
         StepType.OPEN_FILE -> openFile(ctx, svc, step, rc)
         StepType.TAP_ELEMENT -> tapElement(svc, step)
         StepType.EDIT_FILE -> editFile(ctx, step, rc)
+        StepType.SCROLL -> scroll(svc, step)
+        StepType.OPEN_URL -> openUrl(ctx, svc, step, rc)
+        StepType.SEND_EMAIL -> sendEmail(ctx, svc, step, rc)
         StepType.WAIT_ELEMENT -> waitElement(svc, step)
         StepType.INPUT_TEXT -> inputText(svc, step, rc)
         StepType.SYSTEM_KEY -> {
@@ -416,5 +419,74 @@ object StepExec {
         } catch (e: Exception) {
             fail("Couldn't share: ${e.message}")
         }
+    }
+
+    // ------------------------------------------------------------------ Scroll / web page / email
+
+    private suspend fun scroll(svc: AutomationService, step: Step): Outcome {
+        val sel = Selector.from(step)
+        val down = step.s("dir", "down") != "up"
+        val times = step.i("times", 1).coerceIn(1, 30)
+        if (sel.pkg.isNotBlank()) svc.waitForPackage(sel.pkg, 10_000)
+        val node = if (sel.hasKeys) svc.waitFor(sel, step.i("timeout", 15) * 1000L) else null
+        if (sel.hasKeys && node == null && !sel.hasPoint) return fail("Couldn't find “${sel.label}” to scroll")
+        var done = 0
+        repeat(times) {
+            if (svc.scrollNode(node, down)) done++
+            delay(700)
+        }
+        return if (done > 0) ok("Scrolled ${if (down) "down" else "up"} ×$done") else fail("Couldn't scroll there")
+    }
+
+    private suspend fun openUrl(ctx: Context, svc: AutomationService, step: Step, rc: RunContext): Outcome {
+        val url = expand(step.s("url"), rc).trim()
+        if (!url.matches(Regex("(?i)^[a-z][a-z0-9+.-]*://.+"))) return fail("Enter a full link starting with https://")
+        val pkg = step.s("pkg")
+        val i = Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (pkg.isNotBlank()) {
+            if (!installed(ctx, pkg)) return fail("${step.s("appName", pkg)} isn't installed")
+            i.setPackage(pkg)
+            rc.lastPkg = pkg
+        }
+        return try {
+            svc.startActivity(i)
+            if (pkg.isNotBlank() && !svc.waitForPackage(pkg, 15_000)) return fail("${step.s("appName", pkg)} didn't open")
+            delay(1500)
+            ok("Opened $url")
+        } catch (e: Exception) {
+            fail("No app could open that link (${e.javaClass.simpleName})")
+        }
+    }
+
+    private suspend fun sendEmail(ctx: Context, svc: AutomationService, step: Step, rc: RunContext): Outcome {
+        fun list(key: String) = expand(step.s(key), rc).split(',', ';', ' ').map { it.trim() }.filter { it.contains('@') }.toTypedArray()
+        val to = list("to")
+        if (to.isEmpty()) return fail("Enter at least one email address")
+        val pkg = step.s("app", "com.google.android.gm")
+        if (pkg.isNotBlank() && !installed(ctx, pkg)) return fail("${step.s("appName", "Gmail")} isn't installed")
+        val attach = step.b("attach", true) && rc.files.isNotEmpty()
+        val i = if (attach) shareIntent(ctx, rc.files) else Intent(Intent.ACTION_SEND).setType("message/rfc822").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        i.putExtra(Intent.EXTRA_EMAIL, to)
+        list("cc").takeIf { it.isNotEmpty() }?.let { i.putExtra(Intent.EXTRA_CC, it) }
+        i.putExtra(Intent.EXTRA_SUBJECT, expand(step.s("subject"), rc))
+        i.putExtra(Intent.EXTRA_TEXT, expand(step.s("body"), rc))
+        if (pkg.isNotBlank()) i.setPackage(pkg)
+        try {
+            svc.startActivity(i)
+        } catch (e: Exception) {
+            return fail("Couldn't open the mail app: ${e.message}")
+        }
+        if (pkg.isNotBlank() && !svc.waitForPackage(pkg, 15_000)) return fail("The mail app didn't open")
+        delay(2500)
+        val files = if (attach) " with ${rc.files.size} file(s)" else ""
+        if (!step.b("autoSend", true)) return ok("Email to ${to.joinToString()}$files is ready — waiting for you to press Send")
+        val send = Selector(pkg, "", "", "Send", "", -1f, -1f, 0, 0, "Send")
+        val byId = Selector(pkg, "$pkg:id/send", "", "", "", -1f, -1f, 0, 0, "Send")
+        val node = svc.waitFor(byId, 8000) ?: svc.waitFor(send, 4000)
+            ?: return fail("Couldn't find the mail app's Send button. On screen: ${svc.describeScreen(pkg)}")
+        if (!(svc.clickNode(node) || svc.tapNode(node))) return fail("Found Send but couldn't press it")
+        // Sent = the compose screen closes.
+        return if (svc.waitGone(byId, 10_000) && svc.find(send) == null) ok("Emailed ${to.joinToString()}$files")
+        else fail("Pressed Send but the email is still open — please check the mail app")
     }
 }
