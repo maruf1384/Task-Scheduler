@@ -66,6 +66,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import com.taskpilot.app.core.A11yState
+import com.taskpilot.app.core.RunStatus
+import com.taskpilot.app.core.StepStatus
+import com.taskpilot.app.engine.AutomationService
+import com.taskpilot.app.engine.Diagnostics
+import com.taskpilot.app.ui.rememberToast
+import androidx.compose.runtime.produceState
+import kotlinx.coroutines.delay
 import com.taskpilot.app.data.Repo
 import com.taskpilot.app.data.RunRecord
 import com.taskpilot.app.engine.Oem
@@ -98,7 +106,7 @@ fun HistoryTab() {
             Row(Modifier.statusBarsPadding().padding(top = 12.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("History", style = MaterialTheme.typography.headlineMedium)
-                    val ok = runs.count { it.status == "success" }
+                    val ok = runs.count { it.status == RunStatus.SUCCESS }
                     Text(
                         if (runs.isEmpty()) "Every run is logged here, step by step" else "${runs.size} runs · $ok succeeded",
                         style = MaterialTheme.typography.bodyMedium,
@@ -136,10 +144,13 @@ private val whenFmt = SimpleDateFormat("EEE d MMM · h:mm a", Locale.getDefault(
 @Composable
 private fun RunCard(r: RunRecord) {
     var open by remember { mutableStateOf(false) }
+    val ctx = LocalContext.current
+    val toast = rememberToast()
     val color = when (r.status) {
-        "success" -> Success
-        "failed" -> Danger
-        else -> MaterialTheme.colorScheme.onSurfaceVariant
+        RunStatus.SUCCESS -> Success
+        RunStatus.FAILED -> Danger
+        RunStatus.SKIPPED -> Warn
+        RunStatus.STOPPED, RunStatus.NEVER -> MaterialTheme.colorScheme.onSurfaceVariant
     }
     Card(
         onClick = { open = !open },
@@ -154,13 +165,18 @@ private fun RunCard(r: RunRecord) {
                 Column(Modifier.weight(1f)) {
                     Text(r.workflowName, style = MaterialTheme.typography.titleMedium)
                     Text(
-                        "${whenFmt.format(Date(r.startedAt))} · ${r.trigger} · ${fmtDuration(r.endedAt - r.startedAt)}",
+                        "${whenFmt.format(Date(r.startedAt))} · ${r.trigger.label} · ${fmtDuration(r.endedAt - r.startedAt)}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 Pill(
-                    when (r.status) { "success" -> "Done"; "failed" -> "Failed"; else -> "Stopped" },
+                    when (r.status) {
+                        RunStatus.SUCCESS -> "Done"
+                        RunStatus.FAILED -> "Failed"
+                        RunStatus.SKIPPED -> "Skipped"
+                        RunStatus.STOPPED, RunStatus.NEVER -> "Stopped"
+                    },
                     color,
                 )
             }
@@ -168,7 +184,7 @@ private fun RunCard(r: RunRecord) {
                 Text(
                     r.summary,
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (r.status == "failed") Danger else MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (r.status == RunStatus.FAILED) Danger else MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 8.dp),
                 )
             }
@@ -177,9 +193,9 @@ private fun RunCard(r: RunRecord) {
                 r.logs.forEach { l ->
                     Row(Modifier.padding(vertical = 4.dp), verticalAlignment = Alignment.Top) {
                         val (ic, c) = when (l.status) {
-                            "ok" -> Icons.Rounded.CheckCircle to Success
-                            "failed" -> Icons.Rounded.Cancel to Danger
-                            else -> Icons.Rounded.RemoveCircleOutline to MaterialTheme.colorScheme.onSurfaceVariant
+                            StepStatus.OK -> Icons.Rounded.CheckCircle to Success
+                            StepStatus.FAILED -> Icons.Rounded.Cancel to Danger
+                            StepStatus.SKIPPED -> Icons.Rounded.RemoveCircleOutline to MaterialTheme.colorScheme.onSurfaceVariant
                         }
                         Icon(ic, null, Modifier.size(18.dp), tint = c)
                         Spacer(Modifier.width(10.dp))
@@ -192,6 +208,16 @@ private fun RunCard(r: RunRecord) {
                 }
             } else if (r.logs.isNotEmpty()) {
                 Text("Tap for step details", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 6.dp))
+            }
+            if (open) {
+                // For whoever helps fix a problem (a person or an AI): what ran, what state the app was in.
+                TextButton(
+                    onClick = {
+                        Diagnostics.copy(ctx, r)
+                        toast("Report copied. It has this run's steps and recent state changes — no PIN, no screen contents.")
+                    },
+                    contentPadding = PaddingValues(0.dp),
+                ) { Text("Copy report") }
             }
         }
     }
@@ -218,7 +244,18 @@ fun SetupTab() {
     val notifLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { tick++ }
 
     val files = remember(tick) { Perms.allFiles(ctx) }
-    val a11y = remember(tick) { Perms.accessibility(ctx) }
+    val connected by AutomationService.connected.collectAsState()
+    val a11yState = remember(tick, connected) { Perms.a11yState(ctx) }
+    // "On but not running" only counts once it has lasted a moment (right after the app starts,
+    // Android may still be connecting the service).
+    val a11yStuck by produceState(false, a11yState) {
+        value = false
+        if (a11yState == A11yState.ON_NOT_RUNNING) {
+            delay(2500)
+            value = Perms.a11yState(ctx) == A11yState.ON_NOT_RUNNING
+        }
+    }
+    val a11y = a11yState != A11yState.OFF && !a11yStuck
     val notif = remember(tick) { Perms.notifications(ctx) }
     val alarms = remember(tick) { Perms.exactAlarms(ctx) }
     val battery = remember(tick) { Perms.battery(ctx) }
@@ -246,7 +283,20 @@ fun SetupTab() {
                 "Lets TaskPilot tap Run in Pydroid and Send in WhatsApp. It stays idle except during a run.",
                 a11y, "Turn on") { open(ctx, Perms.accessibilityIntent(ctx)) }
         }
-        if (!a11y && Oem.restrictedSettingsApply) {
+        if (a11yStuck) {
+            item {
+                InfoCard(
+                    Icons.Rounded.ErrorOutline,
+                    "Switched on, but not running",
+                    "The switch is on in Android's settings, yet ${Oem.label} has stopped the service — automations can't run like this. " +
+                        "Open Accessibility, turn TaskPilot OFF and ON again." +
+                        if (Oem.isHeavySkin) " To keep it from happening again, allow auto-launch and remove battery limits for TaskPilot in App info." else "",
+                    Warn,
+                    action = "Open Accessibility" to { open(ctx, Perms.accessibilityIntent(ctx)) },
+                )
+            }
+        }
+        if (a11yState == A11yState.OFF && Oem.restrictedSettingsApply) {
             item { RestrictedSettingsCard(ctx) }
         }
         item {
@@ -419,8 +469,9 @@ private fun UpdateCard(ctx: Context, tick: Int) {
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     val (installedName, installedCode) = remember { com.taskpilot.app.engine.Updater.currentVersion(ctx) }
     var found by remember { mutableStateOf<List<com.taskpilot.app.engine.Updater.Candidate>>(emptyList()) }
-    var busy by remember { mutableStateOf(false) }
-    var status by remember { mutableStateOf<String?>(null) }
+    // Where the update is — Idle / NeedsPermission / Preparing / Confirming / Failed / Rejected.
+    // Android's answer arrives in InstallReceiver and lands in the same state.
+    val update by com.taskpilot.app.engine.Updater.state.collectAsState()
     var pick by remember { mutableStateOf(false) }
     androidx.compose.runtime.LaunchedEffect(tick) {
         found = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -430,18 +481,8 @@ private fun UpdateCard(ctx: Context, tick: Int) {
     val newer = found.firstOrNull { it.versionCode > installedCode }
 
     fun install(c: com.taskpilot.app.engine.Updater.Candidate) {
-        if (!com.taskpilot.app.engine.Updater.canInstall(ctx)) {
-            open(ctx, com.taskpilot.app.engine.Updater.allowInstallIntent(ctx))
-            status = "Turn on “Allow from this source” for TaskPilot, come back, and tap Install again. (Only needed once.)"
-            return
-        }
-        busy = true
-        status = "Preparing ${c.file.name}…"
-        scope.launch {
-            val err = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { com.taskpilot.app.engine.Updater.install(ctx, c) }
-            busy = false
-            status = err ?: "Android will now ask you to confirm the update. TaskPilot closes and reopens with everything kept."
-        }
+        if (!com.taskpilot.app.engine.Updater.canInstall(ctx)) open(ctx, com.taskpilot.app.engine.Updater.allowInstallIntent(ctx))
+        scope.launch(kotlinx.coroutines.Dispatchers.IO) { com.taskpilot.app.engine.Updater.install(ctx, c) }
     }
 
     Card(
@@ -468,7 +509,7 @@ private fun UpdateCard(ctx: Context, tick: Int) {
             if (newer != null) {
                 Text("Found ${newer.file.name} · version ${newer.versionName}", style = MaterialTheme.typography.labelLarge)
                 Spacer(Modifier.height(6.dp))
-                androidx.compose.material3.Button(onClick = { install(newer) }, enabled = !busy) {
+                androidx.compose.material3.Button(onClick = { install(newer) }, enabled = !update.busy) {
                     Text("Install version ${newer.versionName}")
                 }
             } else {
@@ -479,8 +520,8 @@ private fun UpdateCard(ctx: Context, tick: Int) {
                 )
             }
             TextButton(onClick = { pick = true }, contentPadding = PaddingValues(0.dp)) { Text("Choose an APK file…") }
-            status?.let {
-                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+            update.message?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = if (update.isError) Danger else MaterialTheme.colorScheme.primary)
             }
         }
     }
@@ -494,8 +535,8 @@ private fun UpdateCard(ctx: Context, tick: Int) {
             pick = false
             val c = com.taskpilot.app.engine.Updater.inspect(ctx, java.io.File(path))
             when {
-                c == null -> status = "That file isn't a TaskPilot APK."
-                c.versionCode < installedCode -> status = "That's an older version (${c.versionName}) — Android won't install it over $installedName."
+                c == null -> com.taskpilot.app.engine.Updater.reject("That file isn't a TaskPilot APK.")
+                c.versionCode < installedCode -> com.taskpilot.app.engine.Updater.reject("That's an older version (${c.versionName}) — Android won't install it over $installedName.")
                 else -> install(c)
             }
         }

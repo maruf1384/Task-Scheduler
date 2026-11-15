@@ -13,8 +13,8 @@ android {
         applicationId = "com.taskpilot.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 7
-        versionName = "1.3.0"
+        versionCode = 8
+        versionName = "1.4.0"
     }
 
     // One fixed key so every new build installs over the old one (your automations are kept).
@@ -79,4 +79,18 @@ dependencies {
 
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+
+    // Plain JVM unit tests for the state machines in core/ (no phone or emulator needed).
+    testImplementation("junit:junit:4.13.2")
+}
+
+// Print why a test failed straight into the build log (the cloud build turns that into annotations).
+tasks.withType<Test>().configureEach {
+    testLogging {
+        events("failed")
+        showExceptions = true
+        showCauses = true
+        showStackTraces = false
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
 }

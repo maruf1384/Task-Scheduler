@@ -25,7 +25,7 @@ import com.taskpilot.app.data.Selector
 import com.taskpilot.app.data.StepType
 import com.taskpilot.app.engine.AutomationService
 import com.taskpilot.app.engine.Recorder
-import com.taskpilot.app.engine.Runner
+import com.taskpilot.app.core.RecSession
 import com.taskpilot.app.ui.rememberToast
 
 /**
@@ -35,13 +35,12 @@ import com.taskpilot.app.ui.rememberToast
  */
 fun startRecording(wfId: String, insertAt: Int, pkg: String, appName: String): String? {
     val svc = AutomationService.instance ?: return "Turn on the TaskPilot accessibility service in Setup first."
-    if (Runner.isRunning) return "An automation is running — wait for it to finish."
     val before = Repo.get(wfId)?.steps?.take(insertAt).orEmpty()
     val alreadyThere = before.any { s ->
         s.s("pkg") == pkg || s.s(Selector.PKG) == pkg ||
             (s.type == StepType.SEND_WHATSAPP && s.s("app") == pkg)
     }
-    return Recorder.start(svc, Recorder.Session(wfId, insertAt, pkg, appName), addOpenStep = !alreadyThere)
+    return Recorder.start(svc, RecSession(wfId, insertAt, pkg, appName), addOpenStep = !alreadyThere)?.message
 }
 
 /** The highlighted "Build it in the real app" card used in the add-step and new-automation sheets. */

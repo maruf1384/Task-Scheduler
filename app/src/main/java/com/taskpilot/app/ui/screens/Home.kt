@@ -73,8 +73,16 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import com.taskpilot.app.data.Repo
 import com.taskpilot.app.data.Templates
 import com.taskpilot.app.data.Workflow
+import com.taskpilot.app.core.A11yState
+import com.taskpilot.app.core.EngineMode
+import com.taskpilot.app.core.RunStatus
+import com.taskpilot.app.core.Trigger
+import com.taskpilot.app.engine.AutomationService
+import com.taskpilot.app.engine.Engine
 import com.taskpilot.app.engine.Perms
 import com.taskpilot.app.engine.Runner
+import androidx.compose.runtime.produceState
+import kotlinx.coroutines.delay
 import com.taskpilot.app.engine.Scheduler
 import com.taskpilot.app.ui.EmojiBadge
 import com.taskpilot.app.ui.Nav
@@ -95,8 +103,8 @@ import java.util.UUID
 @Composable
 fun HomeScreen(nav: Nav) {
     var tab by rememberSaveable { mutableIntStateOf(0) }
-    var showNew by remember { mutableStateOf(false) }
-    var pickForBuild by remember { mutableStateOf(false) }
+    // One dialog at a time: nothing → "New automation" sheet → (Build in the real app) → app picker.
+    var dialog by remember { mutableStateOf<HomeDialog?>(null) }
     val homeToast = rememberToast()
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -110,7 +118,7 @@ fun HomeScreen(nav: Nav) {
         floatingActionButton = {
             if (tab == 0) {
                 ExtendedFloatingActionButton(
-                    onClick = { showNew = true },
+                    onClick = { dialog = HomeDialog.NEW_AUTOMATION },
                     icon = { Icon(Icons.Rounded.Add, null) },
                     text = { Text("New automation") },
                     containerColor = MaterialTheme.colorScheme.primary,
@@ -127,31 +135,49 @@ fun HomeScreen(nav: Nav) {
             }
         }
     }
-    if (pickForBuild) {
-        AppPickerDialog(onDismiss = { pickForBuild = false }) { pkg, label ->
-            pickForBuild = false
+    RecorderResultToast()
+    when (dialog) {
+        HomeDialog.NEW_AUTOMATION -> NewAutomationSheet(
+            onDismiss = { dialog = null },
+            onBuildInApp = { dialog = HomeDialog.PICK_APP_TO_BUILD },
+        ) { wf ->
+            dialog = null
+            Repo.upsert(wf)
+            nav.push(Screen.Editor(wf.id))
+        }
+        HomeDialog.PICK_APP_TO_BUILD -> AppPickerDialog(onDismiss = { dialog = null }) { pkg, label ->
+            dialog = null
             val wf = Workflow(name = "$label automation", emoji = "🧭")
             Repo.upsert(wf)
             nav.push(Screen.Editor(wf.id))
             startRecording(wf.id, 0, pkg, label)?.let(homeToast)
         }
-    }
-    RecorderResultToast()
-    if (showNew) NewAutomationSheet(onDismiss = { showNew = false }, onBuildInApp = { showNew = false; pickForBuild = true }) { wf ->
-        showNew = false
-        Repo.upsert(wf)
-        nav.push(Screen.Editor(wf.id))
+        null -> {}
     }
 }
+
+/** The dialogs of the Home screen — at most one is open. */
+private enum class HomeDialog { NEW_AUTOMATION, PICK_APP_TO_BUILD }
 
 @Composable
 private fun AutomationsTab(nav: Nav, openSetup: () -> Unit) {
     val ctx = LocalContext.current
     val wfs by Repo.workflows.collectAsState()
-    val running by Runner.state.collectAsState()
+    val mode by Engine.mode.collectAsState()
+    val running = (mode as? EngineMode.Running)?.run ?: (mode as? EngineMode.Capturing)?.run
+    val loadProblem by Repo.loadProblem.collectAsState()
     var tick by remember { mutableIntStateOf(0) }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { tick++ }
-    val ready = remember(tick, wfs) { Perms.readiness(ctx) }
+    val connected by AutomationService.connected.collectAsState()
+    val ready = remember(tick, wfs, connected) { Perms.readiness(ctx) }
+    // Accessibility is switched on but Android isn't running the service (after a moment's grace).
+    val a11yStuck by produceState(false, tick, connected) {
+        value = false
+        if (Perms.a11yState(ctx) == A11yState.ON_NOT_RUNNING) {
+            delay(2500)
+            value = Perms.a11yState(ctx) == A11yState.ON_NOT_RUNNING
+        }
+    }
     val next = remember(wfs, tick) {
         wfs.mapNotNull { w -> Scheduler.nextTrigger(w.schedule)?.let { w to it } }.minByOrNull { it.second }
     }
@@ -185,7 +211,7 @@ private fun AutomationsTab(nav: Nav, openSetup: () -> Unit) {
                                 Text("Running · ${r.wfName}", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSecondaryContainer)
                                 Text("Step ${r.index + 1} of ${r.total} · ${r.stepTitle}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSecondaryContainer)
                             }
-                            FilledTonalButton(onClick = { Runner.stop() }) {
+                            FilledTonalButton(onClick = { Engine.stopRun() }) {
                                 Icon(Icons.Rounded.Stop, null, Modifier.size(18.dp))
                                 Spacer(Modifier.width(6.dp))
                                 Text("Stop")
@@ -198,6 +224,20 @@ private fun AutomationsTab(nav: Nav, openSetup: () -> Unit) {
                         )
                     }
                 }
+            }
+        }
+
+        loadProblem?.let { problem ->
+            item(key = "loadProblem") { NoticeCard("Saved data couldn't be read", problem, onClick = null) }
+        }
+
+        if (a11yStuck) {
+            item(key = "a11yStuck") {
+                NoticeCard(
+                    "Accessibility is on, but not running",
+                    "Your phone has stopped TaskPilot's service, so automations can't run. Tap to fix it in Setup.",
+                    onClick = openSetup,
+                )
             }
         }
 
@@ -256,14 +296,14 @@ private fun AutomationsTab(nav: Nav, openSetup: () -> Unit) {
                     Scheduler.schedule(ctx, updated)
                     if (on) Scheduler.nextTrigger(s)?.let { toast("Next run ${fmtWhen(it)}") }
                 },
-                onRun = { Runner.launch(ctx, wf.id, "Manual")?.let(toast) },
+                onRun = { Runner.launch(ctx, wf.id, Trigger.MANUAL)?.let { toast(it.message) } },
                 onDuplicate = {
                     val copy = wf.copy(
                         id = UUID.randomUUID().toString(),
                         name = wf.name + " (copy)",
                         schedule = wf.schedule.copy(enabled = false),
                         steps = wf.steps.map { it.copy(id = UUID.randomUUID().toString()) },
-                        lastRunAt = 0, lastStatus = "",
+                        lastRunAt = 0, lastStatus = RunStatus.NEVER,
                     )
                     Repo.upsert(copy)
                     toast("Duplicated")
@@ -355,10 +395,13 @@ private fun WorkflowCard(
                 when {
                     isRunning -> Pill("Running now", MaterialTheme.colorScheme.secondary)
                     issues > 0 -> Pill("$issues thing${if (issues > 1) "s" else ""} to set up", Warn)
-                    wf.lastStatus == "success" -> Pill("Last run OK · ${fmtAgo(wf.lastRunAt)}", Success)
-                    wf.lastStatus == "failed" -> Pill("Last run failed · ${fmtAgo(wf.lastRunAt)}", Danger)
-                    wf.lastStatus == "stopped" -> Pill("Stopped · ${fmtAgo(wf.lastRunAt)}", MaterialTheme.colorScheme.onSurfaceVariant)
-                    else -> Pill("Never run", MaterialTheme.colorScheme.onSurfaceVariant)
+                    else -> when (wf.lastStatus) {
+                        RunStatus.SUCCESS -> Pill("Last run OK · ${fmtAgo(wf.lastRunAt)}", Success)
+                        RunStatus.FAILED -> Pill("Last run failed · ${fmtAgo(wf.lastRunAt)}", Danger)
+                        RunStatus.STOPPED -> Pill("Stopped · ${fmtAgo(wf.lastRunAt)}", MaterialTheme.colorScheme.onSurfaceVariant)
+                        RunStatus.SKIPPED -> Pill("Skipped · ${fmtAgo(wf.lastRunAt)}", Warn)
+                        RunStatus.NEVER -> Pill("Never run", MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
                 Spacer(Modifier.weight(1f))
                 IconButton(onClick = onRun) {
@@ -427,6 +470,25 @@ private fun BlankOrTemplateButtons(onCreate: (Workflow) -> Unit) {
                 }
                 Icon(Icons.Rounded.AutoAwesome, null, tint = MaterialTheme.colorScheme.primary)
             }
+        }
+    }
+}
+
+/** A warning the user should not miss (amber card at the top of Home). */
+@Composable
+private fun NoticeCard(title: String, text: String, onClick: (() -> Unit)?) {
+    Card(
+        onClick = { onClick?.invoke() },
+        enabled = onClick != null,
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+            disabledContainerColor = MaterialTheme.colorScheme.tertiaryContainer,
+        ),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(16.dp)) {
+            Text(title, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onTertiaryContainer)
+            Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onTertiaryContainer)
         }
     }
 }

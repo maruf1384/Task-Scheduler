@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import com.taskpilot.app.core.FilesWatch
 import com.taskpilot.app.data.EditParams
 import com.taskpilot.app.data.Phone
 import com.taskpilot.app.data.Selector
@@ -236,62 +237,59 @@ object StepExec {
         else fail("That box doesn't accept text")
     }
 
-    private val ERROR_LINE = Regex("""^\s*[A-Za-z_.]*(Error|Exception|Interrupt|Exit)\b.*:.*""")
-
     private fun fmtLeft(ms: Long): String {
         val s = (ms / 1000).coerceAtLeast(0)
         return "%d:%02d left".format(s / 60, s % 60)
     }
 
+    /**
+     * Looks at the folder (and, while there are no files yet, at the app that should be making
+     * them) and lets [FilesWatch] decide: keep waiting, the files are complete, or the script
+     * ended without making any.
+     */
     private suspend fun waitNewFiles(svc: AutomationService, step: Step, rc: RunContext): Outcome {
         val folder = File(step.s("folder"))
         if (!folder.isDirectory) return fail("Folder not found: ${FileOps.pretty(folder.absolutePath)}")
         val exts = FileOps.parseExts(step.s("ext"))
         val timeout = step.i("timeout", 600).coerceAtLeast(5) * 1000L
-        val settle = step.i("settle", 6).coerceAtLeast(1) * 1000L
         val watchPkg = step.s("watchPkg").ifBlank { rc.lastPkg }
         val stopEarly = step.b("stopEarly", true) && watchPkg.isNotBlank()
         val since = rc.startMs - 2000
-        val end = System.currentTimeMillis() + timeout
-        var lastSig = ""
-        var stableSince = 0L
+        var watch = FilesWatch(
+            startedAt = System.currentTimeMillis(),
+            timeoutMs = timeout,
+            settleMs = step.i("settle", 6).coerceAtLeast(1) * 1000L,
+        )
         var lastPill = 0L
-        var lastWatch = 0L
-        var endedAt = 0L               // when the app showed the script had finished / crashed
-        var endedHow = ""
-        var errorLine = ""
-        while (System.currentTimeMillis() < end) {
+        var lastLook = 0L
+        while (true) {
             val now = System.currentTimeMillis()
+            if (watch.timedOut(now)) break
             val found = FileOps.scanNew(folder, since, exts, step.b("recursive", true))
-            if (found.isNotEmpty()) {
-                val sig = found.joinToString("|") { "${it.path}:${it.length()}:${it.lastModified()}" }
-                if (sig != lastSig) {
-                    lastSig = sig
-                    stableSince = now
-                } else if (now - stableSince >= settle) {
+            val sig = found.joinToString("|") { "${it.path}:${it.length()}:${it.lastModified()}" }
+            var (next, verdict) = watch.files(now, sig)
+            if (found.isEmpty() && stopEarly && now - lastLook >= 3000) {
+                lastLook = now
+                // Pydroid prints "[Program finished]" when a script ends, and a Traceback when it crashes.
+                val looked = next.screen(now, svc.screenTexts(watchPkg))
+                next = looked.first
+                verdict = looked.second
+            }
+            watch = next
+            when (val v = verdict) {
+                FilesWatch.Verdict.Ready -> {
                     rc.files = found
                     return ok("${found.size} new file(s): ${found.joinToString(", ") { it.name }}")
                 }
-            } else if (stopEarly && now - lastWatch >= 3000) {
-                lastWatch = now
-                // Pydroid prints "[Program finished]" when a script ends, and a Traceback when it crashes.
-                val lines = svc.screenTexts(watchPkg).flatMap { it.split('\n') }.map { it.trim() }
-                val crashed = lines.any { it.startsWith("Traceback (most recent call last)") }
-                val finished = lines.any { it.contains("[Program finished]") }
-                if ((crashed || finished) && endedAt == 0L) {
-                    endedAt = now
-                    endedHow = if (crashed) "crashed" else "finished"
-                    errorLine = lines.lastOrNull { ERROR_LINE.matches(it) }?.take(220) ?: ""
+                is FilesWatch.Verdict.ScriptEnded -> {
+                    val why = if (v.end.errorLine.isNotBlank()) " Error: ${v.end.errorLine}" else ""
+                    return fail("The script ${v.end.how} without making new files in ${folder.name}.$why")
                 }
-                // Give a just-finished script 12 s to flush its files before giving up.
-                if (endedAt != 0L && now - endedAt > 12_000) {
-                    val why = if (errorLine.isNotBlank()) " Error: $errorLine" else ""
-                    return fail("The script $endedHow without making new files in ${folder.name}.$why")
-                }
+                FilesWatch.Verdict.Waiting, FilesWatch.Verdict.TimedOut -> {}
             }
             if (now - lastPill >= 5000 && rc.pillPrefix.isNotBlank()) {
                 lastPill = now
-                svc.updateRunPill("${rc.pillPrefix} · ${fmtLeft(end - now)}")
+                svc.updateRunPill("${rc.pillPrefix} · ${fmtLeft(watch.msLeft(now))}")
             }
             delay(1500)
         }

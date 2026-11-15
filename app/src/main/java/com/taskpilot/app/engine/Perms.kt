@@ -11,19 +11,27 @@ import android.os.Build
 import android.os.Environment
 import android.os.PowerManager
 import android.provider.Settings
+import com.taskpilot.app.core.A11yState
 
 object Perms {
     fun allFiles(ctx: Context): Boolean =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) Environment.isExternalStorageManager()
         else ctx.checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
 
-    fun accessibility(ctx: Context): Boolean {
-        if (AutomationService.instance != null) return true
+    /** Switched on in Android's settings (which is not the same as running — see [a11yState]). */
+    private fun a11yEnabledInSettings(ctx: Context): Boolean {
         val enabled = Settings.Secure.getString(ctx.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
             ?: return false
         val me = ComponentName(ctx, AutomationService::class.java)
         return enabled.split(':').any { ComponentName.unflattenFromString(it) == me }
     }
+
+    /** OFF, switched on but not running (the phone stopped it), or READY. */
+    fun a11yState(ctx: Context): A11yState =
+        A11yState.of(enabledInSettings = a11yEnabledInSettings(ctx), connected = AutomationService.instance != null)
+
+    /** The switch is on (or the service is connected). Setup's checklist item. */
+    fun accessibility(ctx: Context): Boolean = a11yState(ctx) != A11yState.OFF
 
     fun notifications(ctx: Context): Boolean =
         Build.VERSION.SDK_INT < 33 ||

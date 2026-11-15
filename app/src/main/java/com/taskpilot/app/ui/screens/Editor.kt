@@ -89,7 +89,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.taskpilot.app.core.EngineMode
+import com.taskpilot.app.core.RunStatus
+import com.taskpilot.app.core.Trigger
 import com.taskpilot.app.data.EditParams
+import com.taskpilot.app.engine.Engine
 import com.taskpilot.app.data.Repo
 import com.taskpilot.app.data.Templates
 import com.taskpilot.app.engine.CodeEdit
@@ -122,7 +126,8 @@ fun EditorScreen(wfId: String, nav: Nav) {
     val ctx = LocalContext.current
     val all by Repo.workflows.collectAsState()
     val wf = all.firstOrNull { it.id == wfId }
-    val running by Runner.state.collectAsState()
+    val mode by Engine.mode.collectAsState()
+    val running = (mode as? EngineMode.Running)?.run ?: (mode as? EngineMode.Capturing)?.run
     val toast = rememberToast()
     val snack = LocalSnack.current
     val scope = rememberCoroutineScope()
@@ -137,10 +142,8 @@ fun EditorScreen(wfId: String, nav: Nav) {
         Scheduler.schedule(ctx, w)
     }
 
-    var showAdd by remember { mutableStateOf<Int?>(null) } // insert position
-    var recordAt by remember { mutableStateOf<Int?>(null) } // "Build it in the real app" insert position
-    var showRename by remember { mutableStateOf(false) }
-    var showTime by remember { mutableStateOf(false) }
+    // One dialog at a time (it used to be four separate flags that could, in principle, all be on).
+    var dialog by remember { mutableStateOf<EditorDialog?>(null) }
     var menu by remember { mutableStateOf(false) }
     val isMine = running?.wfId == wf.id
 
@@ -149,7 +152,7 @@ fun EditorScreen(wfId: String, nav: Nav) {
         topBar = {
             TopAppBar(
                 title = {
-                    Row(Modifier.clickable { showRename = true }, verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.clickable { dialog = EditorDialog.Rename }, verticalAlignment = Alignment.CenterVertically) {
                         Text(wf.emoji + "  ", style = MaterialTheme.typography.titleLarge)
                         Text(wf.name, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                         Icon(Icons.Rounded.Edit, "Rename", Modifier.padding(start = 6.dp).size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -160,14 +163,14 @@ fun EditorScreen(wfId: String, nav: Nav) {
                     Box {
                         IconButton(onClick = { menu = true }) { Icon(Icons.Rounded.MoreVert, "More") }
                         DropdownMenu(menu, { menu = false }) {
-                            DropdownMenuItem(text = { Text("Rename & icon") }, leadingIcon = { Icon(Icons.Rounded.Edit, null) }, onClick = { menu = false; showRename = true })
+                            DropdownMenuItem(text = { Text("Rename & icon") }, leadingIcon = { Icon(Icons.Rounded.Edit, null) }, onClick = { menu = false; dialog = EditorDialog.Rename })
                             DropdownMenuItem(text = { Text("Duplicate") }, leadingIcon = { Icon(Icons.Rounded.ContentCopy, null) }, onClick = {
                                 menu = false
                                 val copy = wf.copy(
                                     id = UUID.randomUUID().toString(), name = wf.name + " (copy)",
                                     schedule = wf.schedule.copy(enabled = false),
                                     steps = wf.steps.map { it.copy(id = UUID.randomUUID().toString()) },
-                                    lastRunAt = 0, lastStatus = "",
+                                    lastRunAt = 0, lastStatus = RunStatus.NEVER,
                                 )
                                 Repo.upsert(copy)
                                 nav.replace(Screen.Editor(copy.id))
@@ -190,14 +193,14 @@ fun EditorScreen(wfId: String, nav: Nav) {
                     Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 12.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    OutlinedButton(onClick = { showAdd = wf.steps.size }, modifier = Modifier.weight(1f).height(52.dp)) {
+                    OutlinedButton(onClick = { dialog = EditorDialog.AddStep(wf.steps.size) }, modifier = Modifier.weight(1f).height(52.dp)) {
                         Icon(Icons.Rounded.Add, null)
                         Spacer(Modifier.width(6.dp))
                         Text("Add step")
                     }
                     if (isMine) {
                         Button(
-                            onClick = { Runner.stop() },
+                            onClick = { Engine.stopRun() },
                             modifier = Modifier.weight(1f).height(52.dp),
                             colors = ButtonDefaults.buttonColors(containerColor = Danger),
                         ) {
@@ -207,7 +210,7 @@ fun EditorScreen(wfId: String, nav: Nav) {
                         }
                     } else {
                         Button(
-                            onClick = { Runner.launch(ctx, wf.id, "Manual")?.let(toast) },
+                            onClick = { Runner.launch(ctx, wf.id, Trigger.MANUAL)?.let { toast(it.message) } },
                             modifier = Modifier.weight(1f).height(52.dp),
                             enabled = wf.steps.isNotEmpty() && running == null,
                         ) {
@@ -225,7 +228,7 @@ fun EditorScreen(wfId: String, nav: Nav) {
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp),
         ) {
             item(key = "schedule") {
-                ScheduleCard(wf, onChange = { save(it) }, onPickTime = { showTime = true })
+                ScheduleCard(wf, onChange = { save(it) }, onPickTime = { dialog = EditorDialog.PickTime })
             }
             suggestDatesStep(wf)?.let { (openIndex, script) ->
                 item(key = "suggestEdit") {
@@ -251,7 +254,7 @@ fun EditorScreen(wfId: String, nav: Nav) {
             if (wf.steps.isEmpty()) {
                 item(key = "empty") {
                     Card(
-                        onClick = { showAdd = 0 },
+                        onClick = { dialog = EditorDialog.AddStep(0) },
                         shape = MaterialTheme.shapes.large,
                         border = BorderStroke(1.5.dp, MaterialTheme.colorScheme.outlineVariant),
                         colors = CardDefaults.cardColors(containerColor = Color.Transparent),
@@ -295,9 +298,9 @@ fun EditorScreen(wfId: String, nav: Nav) {
                     onToggle = {
                         save(wf.copy(steps = wf.steps.map { if (it.id == step.id) it.copy(enabled = !it.enabled) else it }))
                     },
-                    onInsertBelow = { showAdd = i + 1 },
-                    onRunFrom = { Runner.launch(ctx, wf.id, "Manual", startAt = i)?.let(toast) },
-                    onRunOnly = { Runner.launch(ctx, wf.id, "Manual", startAt = i, endExclusive = i + 1)?.let(toast) },
+                    onInsertBelow = { dialog = EditorDialog.AddStep(i + 1) },
+                    onRunFrom = { Runner.launch(ctx, wf.id, Trigger.MANUAL, startAt = i)?.let { toast(it.message) } },
+                    onRunOnly = { Runner.launch(ctx, wf.id, Trigger.MANUAL, startAt = i, endExclusive = i + 1)?.let { toast(it.message) } },
                     onDelete = {
                         val before = wf
                         save(wf.copy(steps = wf.steps.filterNot { it.id == step.id }))
@@ -316,43 +319,53 @@ fun EditorScreen(wfId: String, nav: Nav) {
                             Box(
                                 Modifier.size(28.dp).clip(CircleShape)
                                     .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f))
-                                    .clickable { showAdd = wf.steps.size },
+                                    .clickable { dialog = EditorDialog.AddStep(wf.steps.size) },
                                 contentAlignment = Alignment.Center,
                             ) { Icon(Icons.Rounded.Add, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary) }
                         }
-                        TextButton(onClick = { showAdd = wf.steps.size }) { Text("Add another step") }
+                        TextButton(onClick = { dialog = EditorDialog.AddStep(wf.steps.size) }) { Text("Add another step") }
                     }
                 }
             }
         }
     }
 
-    showAdd?.let { pos ->
-        AddStepSheet(
-            onDismiss = { showAdd = null },
-            onRecord = { showAdd = null; recordAt = pos },
-        ) { type ->
-            showAdd = null
-            nav.push(Screen.StepEdit(wf.id, null, type, pos))
-        }
-    }
-    recordAt?.let { pos ->
-        AppPickerDialog(onDismiss = { recordAt = null }) { pkg, label ->
-            recordAt = null
-            startRecording(wf.id, pos, pkg, label)?.let(toast)
-        }
-    }
     RecorderResultToast()
-    if (showRename) RenameDialog(wf, onDismiss = { showRename = false }) { name, emoji ->
-        showRename = false
-        save(wf.copy(name = name, emoji = emoji))
+    when (val d = dialog) {
+        is EditorDialog.AddStep -> AddStepSheet(
+            onDismiss = { dialog = null },
+            onRecord = { dialog = EditorDialog.PickAppToRecord(d.at) },
+        ) { type ->
+            dialog = null
+            nav.push(Screen.StepEdit(wf.id, null, type, d.at))
+        }
+        is EditorDialog.PickAppToRecord -> AppPickerDialog(onDismiss = { dialog = null }) { pkg, label ->
+            dialog = null
+            startRecording(wf.id, d.at, pkg, label)?.let(toast)
+        }
+        EditorDialog.Rename -> RenameDialog(wf, onDismiss = { dialog = null }) { name, emoji ->
+            dialog = null
+            save(wf.copy(name = name, emoji = emoji))
+        }
+        EditorDialog.PickTime -> TimeDialog(wf.schedule.hour, wf.schedule.minute, onDismiss = { dialog = null }) { h, m ->
+            dialog = null
+            val updated = wf.copy(schedule = wf.schedule.copy(hour = h, minute = m, enabled = true))
+            save(updated)
+            Scheduler.nextTrigger(updated.schedule)?.let { toast("Next run ${fmtWhen(it)}") }
+        }
+        null -> {}
     }
-    if (showTime) TimeDialog(wf.schedule.hour, wf.schedule.minute, onDismiss = { showTime = false }) { h, m ->
-        showTime = false
-        val updated = wf.copy(schedule = wf.schedule.copy(hour = h, minute = m, enabled = true))
-        save(updated)
-        Scheduler.nextTrigger(updated.schedule)?.let { toast("Next run ${fmtWhen(it)}") }
-    }
+}
+
+/** The dialogs of the automation editor — at most one is open. */
+private sealed interface EditorDialog {
+    /** The "Add a step" sheet, inserting at position [at]. */
+    data class AddStep(val at: Int) : EditorDialog
+
+    /** "Build it in the real app" was chosen in that sheet: pick which app. */
+    data class PickAppToRecord(val at: Int) : EditorDialog
+    data object Rename : EditorDialog
+    data object PickTime : EditorDialog
 }
 
 @Composable

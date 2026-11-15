@@ -26,6 +26,9 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.taskpilot.app.core.EngineRules
+import com.taskpilot.app.core.SendFlow
+import com.taskpilot.app.core.Trace
 import com.taskpilot.app.data.Selector
 import com.taskpilot.app.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
@@ -79,14 +82,11 @@ data class CaptureResult(
     val pkg: String,
 )
 
-object CaptureStore {
-    val result = MutableStateFlow<CaptureResult?>(null)
-    val waiting = MutableStateFlow(false)
-}
-
 /**
- * The part that taps buttons inside other apps.
- * While idle it listens to (almost) nothing; it is switched on only during a run or a capture.
+ * The part that reads and taps other apps' screens.
+ *
+ * It keeps no "what am I doing" state of its own: that is `Engine.mode`. While the engine is Idle
+ * the service listens to (almost) nothing; [setActive] is called by the Engine alone.
  */
 class AutomationService : AccessibilityService() {
 
@@ -107,32 +107,42 @@ class AutomationService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         connected.value = true
-        setActive(false)
+        Trace.log("Service", "connected")
+        setActive(EngineRules.serviceActive(Engine.mode.value))
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Runs read the screen on demand; only "Record my taps" listens to events.
+        // Runs read the screen on demand; only the recorder follows events.
         if (event != null && Recorder.isActive) Recorder.onEvent(this, event)
     }
 
     override fun onInterrupt() {}
 
     override fun onUnbind(intent: Intent?): Boolean {
-        Recorder.stop()
-        instance = null
-        connected.value = false
+        lost("unbound")
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
-        instance = null
-        connected.value = false
+        lost("destroyed")
         scope.cancel()
         super.onDestroy()
     }
 
-    /** Idle = minimum events. Active = full events so the screen info stays fresh. */
-    fun setActive(active: Boolean) {
+    /** Android stopped the service: end whatever was using it (a run, a capture, the recorder). */
+    private fun lost(how: String) {
+        if (instance !== this) return
+        Trace.log("Service", how)
+        Engine.serviceLost()        // while `instance` is still set, so overlays can be removed
+        instance = null
+        connected.value = false
+    }
+
+    /**
+     * Idle = minimum events. Active = full events so the screen info stays fresh.
+     * Called only by `Engine` when its mode changes between Idle and anything else.
+     */
+    internal fun setActive(active: Boolean) {
         main.post {
             try {
                 val info = serviceInfo ?: return@post
@@ -509,9 +519,9 @@ class AutomationService : AccessibilityService() {
     data class SendResult(val clicks: Int, val seenInChat: Boolean, val screen: String)
 
     /**
-     * Presses the "Send to …?" confirmation / the preview screen's Send button, then confirms the
-     * files are in the chat and STOPS. The chat's own mic/Send button is pressed only when a
-     * caption was typed and it really shows "Send" — never as a microphone.
+     * Presses Send in WhatsApp and confirms the files are in the chat. WHAT to press and WHEN to
+     * stop is decided by [SendFlow] (pure, tested — it is the rule-set that keeps the microphone
+     * from ever being pressed); this function only looks at the screen and carries out presses.
      */
     suspend fun sendAndConfirm(
         pkg: String,
@@ -519,83 +529,57 @@ class AutomationService : AccessibilityService() {
         captionTyped: Boolean,
         timeoutMs: Long = 45_000,
     ): SendResult {
-        val start = System.currentTimeMillis()
-        val end = start + timeoutMs
-        var clicks = 0
-        var lastClick = 0L
-        var composerPressed = false
-        var quietChecks = 0          // consecutive checks with files in chat and nothing left to press
-        suspend fun press(n: AccessibilityNodeInfo): Boolean {
-            if (!(clickNode(n) || tapNode(n))) return false
-            clicks++
-            lastClick = System.currentTimeMillis()
-            quietChecks = 0
-            delay(2000)
-            return true
-        }
-        while (System.currentTimeMillis() < end && clicks < 4) {
-            // 1) "Send to …?" dialog  2) preview screen's Send — these always come first
-            val confirm = findSend(pkg, SendKind.CONFIRM_DIALOG) ?: findSend(pkg, SendKind.PREVIEW)
-            if (confirm != null) {
-                if (press(confirm)) continue
-            } else if (showsAnyText(pkg, fileNames)) {
-                // 3) the files are in the chat. Send a typed caption once if one is waiting, then stop.
-                val composer = if (captionTyped && !composerPressed) findSend(pkg, SendKind.COMPOSER) else null
-                if (composer != null) {
-                    composerPressed = true
-                    if (press(composer)) continue
+        var flow = SendFlow(startedAt = System.currentTimeMillis(), captionTyped = captionTyped, timeoutMs = timeoutMs)
+        while (true) {
+            var confirmNode: AccessibilityNodeInfo? = null
+            var composerNode: AccessibilityNodeInfo? = null
+            val look = object : SendFlow.Look {
+                override fun confirmVisible(): Boolean {
+                    confirmNode = findSend(pkg, SendKind.CONFIRM_DIALOG) ?: findSend(pkg, SendKind.PREVIEW)
+                    return confirmNode != null
                 }
-                quietChecks++
-                if (quietChecks >= 2) return SendResult(clicks, true, "")
-            } else {
-                quietChecks = 0
+                override fun filesInChat(): Boolean = showsAnyText(pkg, fileNames)
+                override fun composerSendVisible(): Boolean {
+                    composerNode = findSend(pkg, SendKind.COMPOSER)
+                    return composerNode != null
+                }
             }
-            if (clicks > 0 && System.currentTimeMillis() - lastClick > 10_000) break
-            delay(500)
+            val decided = flow.decide(System.currentTimeMillis(), look)
+            flow = decided.first
+            var decision: SendFlow.Decision = decided.second
+            val press = decision as? SendFlow.Decision.Press
+            if (press != null) {
+                val node = if (press.target == SendFlow.Target.CONFIRM) confirmNode else composerNode
+                val ok = node != null && (clickNode(node) || tapNode(node))
+                val after = flow.pressed(System.currentTimeMillis(), press.target, ok)
+                flow = after.first
+                decision = after.second
+            }
+            when (val d = decision) {
+                is SendFlow.Decision.Wait -> delay(d.ms)
+                is SendFlow.Decision.Done -> {
+                    val seen = d.confirmed || showsAnyText(pkg, fileNames)
+                    return SendResult(flow.presses, seen, if (seen) "" else describeScreen(pkg))
+                }
+                is SendFlow.Decision.Press -> delay(SendFlow.LOOK_EVERY_MS)   // never returned by pressed()
+            }
         }
-        val seen = showsAnyText(pkg, fileNames)
-        return SendResult(clicks, seen, if (seen) "" else describeScreen(pkg))
     }
 
     // ------------------------------------------------------------------ element capture
 
-    fun beginCapture(targetPkg: String, launch: Boolean) {
-        setActive(true)
-        CaptureStore.result.value = null
-        CaptureStore.waiting.value = true
-        if (launch && targetPkg.isNotBlank()) {
-            packageManager.getLaunchIntentForPackage(targetPkg)?.let {
-                try { startActivity(it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } catch (_: Exception) {}
-            }
-        }
-        main.postDelayed({ showCapturePill() }, 600)
-    }
-
-    fun cancelCapture() {
-        removeCapturePill()
-        CaptureStore.waiting.value = false
-        setActive(false)
-        bringAppToFront()
-    }
-
-    private fun doCapture() {
-        removeCapturePill()
-        scope.launch {
-            delay(450)
-            val size = screenSize()
-            val elements = collectElements()
-            val shot = screenshot()
-            CaptureStore.result.value = CaptureResult(
-                elements = elements,
-                shot = shot,
-                screenW = size.x,
-                screenH = size.y,
-                pkg = elements.groupingBy { it.pkg }.eachCount().maxByOrNull { it.value }?.key ?: "",
-            )
-            CaptureStore.waiting.value = false
-            setActive(false)
-            bringAppToFront()
-        }
+    /** Reads everything on the screen in front and takes its picture (for "Pick on screen"). */
+    suspend fun captureScreen(): CaptureResult {
+        val size = screenSize()
+        val elements = collectElements()
+        val shot = screenshot()
+        return CaptureResult(
+            elements = elements,
+            shot = shot,
+            screenW = size.x,
+            screenH = size.y,
+            pkg = elements.groupingBy { it.pkg }.eachCount().maxByOrNull { it.value }?.key ?: "",
+        )
     }
 
     private fun collectElements(): List<UiElement> {
@@ -736,20 +720,23 @@ class AutomationService : AccessibilityService() {
         }
     }
 
-    private fun showCapturePill() {
-        removeCapturePill()
-        val p = pill()
-        p.addView(label("Open the screen, then"))
-        p.addView(button("◉ Capture", "#FF3D4ED8") { doCapture() })
-        p.addView(button("✕", "#33FFFFFF") { cancelCapture() })
-        capturePill = p
-        addOverlay(p, 40)
+    fun showCapturePill(onCapture: () -> Unit, onCancel: () -> Unit) {
+        main.post {
+            removeView(capturePill)
+            val p = pill()
+            p.addView(label("Open the screen, then"))
+            p.addView(button("◉ Capture", "#FF3D4ED8") { onCapture() })
+            p.addView(button("✕", "#33FFFFFF") { onCancel() })
+            capturePill = p
+            addOverlay(p, 40)
+        }
     }
 
-    private fun removeCapturePill() {
-        val v = capturePill
-        capturePill = null
-        main.post { removeView(v) }
+    fun hideCapturePill() {
+        main.post {
+            removeView(capturePill)
+            capturePill = null
+        }
     }
 
     fun showRunPill(title: String) {
@@ -758,7 +745,7 @@ class AutomationService : AccessibilityService() {
             val p = pill()
             val t = label("▶ $title", bold = true)
             p.addView(t)
-            p.addView(button("Stop", "#FFD9433A") { Runner.stop() })
+            p.addView(button("Stop", "#FFD9433A") { Engine.stopRun() })
             runText = t
             runPill = p
             addOverlay(p, 6)
