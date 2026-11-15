@@ -47,11 +47,13 @@ Set the time (default 12:40 AM) and days in the Schedule card, then switch it on
 ## Build it in the real app (any app: Gmail, D-Nothi, Chrome…)
 
 *New automation → Build it in the real app* (or *Add step → Build it in the real app*), then choose the app.
-TaskPilot opens it with a floating bar. **Options** lists everything on the current screen — buttons, text boxes,
-list items, switches, scroll areas (the one you select is outlined on the real screen). Pick one, then the action:
-*Tap · Long press · Type text · Wait for it · Scroll*. TaskPilot does it in the app, saves it as a step and lists the
-next screen's options — branch → sub-branch through the real app. Or turn on **Record my taps** and just use the app.
-**Done** adds the steps to the automation. Passwords are never recorded.
+TaskPilot opens it with a floating bar and lists everything on its screen — buttons, text boxes, list items,
+switches, scroll areas (the one you select is outlined on the real screen). Pick one, then the action:
+*Tap · Long press · Type text · Wait for it · Scroll*. TaskPilot does it in the app, saves it as a step, and the list
+moves on to the next screen **by itself** — branch → sub-branch through the real app. The list also follows the
+app while you navigate by hand; things that appear on the same screen (a menu, a loaded row) are tagged **NEW**.
+Or turn on **Record my taps** and just use the app. **Done** adds the steps to the automation.
+Passwords are never recorded.
 
 New steps: **Open a web page** (Chrome or the default browser), **Send an email** (Gmail, with the selected files,
 Send pressed automatically), **Scroll**. Smart dates (`{lastweek.start|d MMM}` …) work in captions, subjects, messages and links.
@@ -61,13 +63,27 @@ Send pressed automatically), **Scroll**. Smart dates (`{lastweek.start|d MMM}` �
 *Add step → On-screen actions → Tap a button → Pick on screen.*
 TaskPilot opens the app (or runs the earlier steps first to reach the right screen), shows a floating **◉ Capture** bar, and brings back a picture of that screen with every tappable thing outlined. Tap the one you want (e.g. *Run*, *Undo*, *Redo*) — or use the List tab to search by name.
 
+## When something goes wrong
+
+*History → open the run → **Copy report***. The report has the app and Android version, which permissions are
+on, the run's steps with their messages, and the app's recent state changes. Paste it to whoever is helping you
+(a person or an AI). It never contains the PIN, typed text or screen contents.
+
+A scheduled run that couldn't start (another automation still running, the service switched off…) now always
+shows up in History as **Skipped** or **Failed**, with the reason.
+
 ## Battery
 
 The system alarm clock wakes TaskPilot at the scheduled minute; nothing else runs in between. The accessibility service listens to almost nothing while idle and switches to full mode only during a run or capture.
 
+## For developers and AI agents
+
+Start with [`AGENTS.md`](AGENTS.md) (build, layout, rules) and [`docs/STATE_MACHINES.md`](docs/STATE_MACHINES.md)
+(every state machine in the app, with diagrams). The state machines are pure Kotlin in `core/` with unit tests.
+
 ## Building
 
-* **Cloud (no PC needed):** push this folder to a GitHub repo → the *Build APK* workflow builds it and publishes `TaskPilot.apk` as a Release.
+* **Cloud (no PC needed):** push to `main` → the *Build APK* workflow runs the unit tests, builds, and publishes `TaskPilot-<version>.apk` as a Release. Push to a `ci/…` branch to test and build without publishing.
 * **Android Studio:** open the folder and Run. (Gradle 8.9, AGP 8.5, Kotlin 2.0, Compose/Material 3, minSdk 26, targetSdk 34.)
 
 All builds are signed with the included `app/taskpilot.keystore`, so updates install over each other and keep your automations.
@@ -76,7 +92,8 @@ All builds are signed with the included `app/taskpilot.keystore`, so updates ins
 
 ```
 app/src/main/java/com/taskpilot/app/
+  core/     State machines as pure Kotlin (unit-tested): engine mode, recorder, screen following, send flow…
   data/     Models (Workflow, Step, Schedule, RunRecord), JSON storage, the template
-  engine/   Scheduler (alarm clock), AutomationService (taps/captures), Runner, StepExec, FileOps, Perms
-  ui/       Compose UI: Home (Automations / History / Setup), Editor, Step editor, pickers
+  engine/   Engine (who owns the screen), Runner, StepExec, AutomationService, Recorder, Capture, Scheduler, Updater
+  ui/       Compose UI: Home (Automations / History / Setup), Editor, Step editor, pickers, recorder overlay
 ```

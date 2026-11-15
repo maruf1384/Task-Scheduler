@@ -14,12 +14,14 @@ for i, ln in enumerate(lines):
     s = ln.strip()
     if s.startswith("e: ") or " error: " in s or s.startswith("ERROR:") or "AAPT: error" in s:
         picked.append(s)
+    elif s.endswith(" FAILED") and " > " in s:      # a unit test: its name, then why it failed
+        picked.append(" | ".join(x.strip() for x in lines[i:i + 4] if x.strip()))
     elif s.startswith("* What went wrong"):
         picked.append(" | ".join(x.strip() for x in lines[i + 1:i + 7] if x.strip()))
 
 seen, uniq = set(), []
 for p in picked:
-    p = re.sub(r"file:///home/runner/work/[^/]+/[^/]+/app/src/main/java/com/taskpilot/app/", "", p)
+    p = re.sub(r"file:///home/runner/work/[^/]+/[^/]+/app/src/(main|test)/java/com/taskpilot/app/", "", p)
     if p not in seen:
         seen.add(p)
         uniq.append(p)

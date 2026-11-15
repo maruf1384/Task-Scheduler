@@ -6,6 +6,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import com.taskpilot.app.core.Trigger
 import com.taskpilot.app.data.Repo
 import com.taskpilot.app.data.Schedule
 import com.taskpilot.app.data.Workflow
@@ -89,7 +90,7 @@ class AlarmReceiver : BroadcastReceiver() {
         if (intent.action != Scheduler.ACTION_RUN) return
         val id = intent.getStringExtra(Scheduler.EXTRA_ID) ?: return
         Scheduler.scheduleAll(ctx, firedId = id)
-        Runner.launch(ctx.applicationContext, id, "Scheduled")
+        Runner.launch(ctx.applicationContext, id, Trigger.SCHEDULED)
     }
 }
 

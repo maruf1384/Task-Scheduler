@@ -1,9 +1,9 @@
 package com.taskpilot.app.data
 
-import com.taskpilot.app.engine.FileEdit
+import com.taskpilot.app.core.RunStatus
+import com.taskpilot.app.core.StepStatus
+import com.taskpilot.app.core.Trigger
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.builtins.ListSerializer
-import java.time.DayOfWeek
 import java.util.UUID
 
 @Serializable
@@ -65,14 +65,14 @@ data class Workflow(
     val schedule: Schedule = Schedule(),
     val createdAt: Long = System.currentTimeMillis(),
     val lastRunAt: Long = 0L,
-    val lastStatus: String = "",
+    val lastStatus: RunStatus = RunStatus.NEVER,
 )
 
 @Serializable
 data class StepLog(
     val index: Int,
     val title: String,
-    val status: String, // ok | failed | skipped
+    val status: StepStatus,
     val message: String = "",
     val durationMs: Long = 0L,
 )
@@ -83,10 +83,10 @@ data class RunRecord(
     val workflowId: String,
     val workflowName: String,
     val emoji: String = "⚡",
-    val trigger: String,
+    val trigger: Trigger,
     val startedAt: Long,
     val endedAt: Long,
-    val status: String, // success | failed | stopped
+    val status: RunStatus,
     val summary: String = "",
     val logs: List<StepLog> = emptyList(),
 )
@@ -145,20 +145,4 @@ object Phone {
         if (d.length == 11 && d.startsWith("01")) d = "88$d"
         return d
     }
-}
-
-/** Settings of the "Edit a file" step (the list of changes is stored as JSON text). */
-object EditParams {
-    private val listSer = ListSerializer(FileEdit.serializer())
-
-    fun edits(step: Step): List<FileEdit> = try {
-        Repo.json.decodeFromString(listSer, step.s("edits", "[]"))
-    } catch (_: Exception) {
-        emptyList()
-    }
-
-    fun withEdits(step: Step, list: List<FileEdit>): Step = step.put("edits", Repo.json.encodeToString(listSer, list))
-
-    /** ISO day number: 1 = Monday … 6 = Saturday, 7 = Sunday (default). */
-    fun weekStart(step: Step): DayOfWeek = DayOfWeek.of(step.i("weekStart", 7).coerceIn(1, 7))
 }

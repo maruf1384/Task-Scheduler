@@ -4,6 +4,7 @@ import android.content.Intent
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.os.Build
+import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -18,10 +19,24 @@ import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import com.taskpilot.app.core.EngineMode
+import com.taskpilot.app.core.OptAction
+import com.taskpilot.app.core.OptKind
+import com.taskpilot.app.core.Owner
+import com.taskpilot.app.core.RecEffect
+import com.taskpilot.app.core.RecEvent
+import com.taskpilot.app.core.RecMode
+import com.taskpilot.app.core.RecSession
+import com.taskpilot.app.core.RecState
+import com.taskpilot.app.core.RecorderMachine
+import com.taskpilot.app.core.Refusal
+import com.taskpilot.app.core.ScreenOption
+import com.taskpilot.app.core.ScreenWatch
+import com.taskpilot.app.core.Trace
 import com.taskpilot.app.data.Repo
 import com.taskpilot.app.data.Selector
 import com.taskpilot.app.data.Step
-import com.taskpilot.app.data.StepType
+import com.taskpilot.app.ui.AppIcons
 import com.taskpilot.app.ui.RecorderBar
 import com.taskpilot.app.ui.RecorderHighlight
 import com.taskpilot.app.ui.RecorderPanel
@@ -32,327 +47,276 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
  * "Build it in the real app": TaskPilot opens another app (Gmail, D-Nothi, Chrome…) and floats a
- * small bar over it. "Options" lists everything you can do on the current screen — buttons, text
- * boxes, list items, switches, scrollable areas. Pick one and an action (tap, type, wait, scroll):
- * TaskPilot does it in the real app, saves it as a step, and lists the options of the next screen.
- * Or switch on "Record my taps" and just use the app — your taps and typing are saved as steps.
+ * small bar over it. The options panel lists everything on the app's current screen; pick one and
+ * what to do with it — TaskPilot does it in the real app, saves it as a step, and the list moves
+ * on to the next screen BY ITSELF. Or switch on "Record my taps" and just use the app.
  *
- * Nothing is sent anywhere; passwords are never recorded.
+ * This file is only the Android half:
+ *  - WHAT state the recorder is in and how it changes → [RecorderMachine] (pure, tested).
+ *  - WHEN to re-read the screen → [ScreenWatch] (pure, tested), fed by accessibility events.
+ *  - Here: read the screen into [ScreenOption]s, carry out [RecEffect]s, show the overlay windows.
+ *
+ * Every change goes through [send]. Nothing is sent anywhere; passwords are never recorded.
  */
 object Recorder {
 
-    data class Session(val wfId: String, val insertAt: Int, val pkg: String, val appName: String)
+    private val _state = MutableStateFlow<RecState?>(null)
 
-    enum class Kind(val title: String) {
-        BUTTON("Buttons"), FIELD("Text boxes"), ITEM("Items"), TOGGLE("Switches"), SCROLL("Scroll areas"),
-    }
-
-    data class Opt(
-        val key: Int,
-        val kind: Kind,
-        val label: String,
-        val detail: String,
-        val bounds: Rect,
-        val params: Map<String, String>,
-        val node: AccessibilityNodeInfo,
-        val password: Boolean,
-    )
-
-    // ------------------------------------------------------------------ state the overlay shows
-    val session = MutableStateFlow<Session?>(null)
-    val steps = MutableStateFlow<List<Step>>(emptyList())
-    val options = MutableStateFlow<List<Opt>>(emptyList())
-    val panelOpen = MutableStateFlow(true)
-    val liveRecord = MutableStateFlow(false)
-    val selected = MutableStateFlow<Opt?>(null)
-    val busy = MutableStateFlow(false)
-    val typingInto = MutableStateFlow<Opt?>(null)
-    val message = MutableStateFlow("")
-    val barOnTop = MutableStateFlow(true)
-    val confirmCancel = MutableStateFlow(false)
+    /** null = the recorder is closed. */
+    val state: StateFlow<RecState?> = _state
 
     /** Shown by TaskPilot when you come back ("Added 6 steps from Gmail"). */
     val finished = MutableStateFlow<String?>(null)
 
-    val isActive: Boolean get() = session.value != null
+    val isActive: Boolean get() = _state.value != null
 
     private var svc: AutomationService? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private var refreshJob: Job? = null
+    private var ticker: Job? = null
+    private var discardTimer: Job? = null
+    private var watch = ScreenWatch()
+
+    /** Counts recorder sessions, so a slow screen read from a closed session can't land in the next one. */
+    private var generation = 0
+
+    /** The live screen nodes behind the options of the last read, by [ScreenOption.sig]. */
+    private var nodes: Map<String, AccessibilityNodeInfo> = emptyMap()
+    private var typingNode: AccessibilityNodeInfo? = null
+
     private var owner: OverlayOwner? = null
     private var barView: View? = null
     private var panelView: View? = null
     private var hiView: View? = null
-    private var ignoreEventsUntil = 0L
-    private var pendingText: Pair<Map<String, String>, String>? = null
 
-    // ------------------------------------------------------------------ start / stop
+    private fun now() = System.currentTimeMillis()
 
-    fun start(service: AutomationService, s: Session, addOpenStep: Boolean): String? {
-        if (Runner.isRunning) return "An automation is running — wait for it to finish first."
-        stop()
+    // ------------------------------------------------------------------ start / close
+
+    fun start(service: AutomationService, session: RecSession, addOpenStep: Boolean): Refusal? {
+        Engine.start(EngineMode.Recording(session.pkg, session.appName))?.let { return it }
         svc = service
-        session.value = s
-        steps.value = if (addOpenStep) listOf(
-            Step(type = StepType.LAUNCH_APP, p = mapOf("pkg" to s.pkg, "appName" to s.appName)),
-        ) else emptyList()
-        options.value = emptyList()
-        selected.value = null
-        typingInto.value = null
-        liveRecord.value = false
-        panelOpen.value = true
-        confirmCancel.value = false
-        message.value = "Opening ${s.appName}…"
-        service.setActive(true)
-        service.packageManager.getLaunchIntentForPackage(s.pkg)?.let {
+        generation++
+        watch = ScreenWatch()
+        nodes = emptyMap()
+        typingNode = null
+        _state.value = RecorderMachine.start(session, addOpenStep)
+        Trace.log("Recorder", "opened")
+        service.packageManager.getLaunchIntentForPackage(session.pkg)?.let {
             try { service.startActivity(it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } catch (_: Exception) {}
         }
         showOverlays(service)
+        startTicker()
         scope.launch {
-            delay(1800)
-            refresh()
-            message.value = "Pick what to do on this screen"
+            // No fixed wait: as soon as the app is really in front, its options are read.
+            val found = withContext(Dispatchers.Default) { service.waitForPackage(session.pkg, 12_000) }
+            send(RecEvent.AppReady(found))
         }
         return null
     }
 
-    fun finish() {
-        flushText()
-        val s = session.value ?: return
-        val recorded = steps.value
-        val wf = Repo.get(s.wfId)
-        if (wf != null && recorded.isNotEmpty()) {
-            val list = wf.steps.toMutableList()
-            list.addAll(s.insertAt.coerceIn(0, list.size), recorded)
-            Repo.upsert(wf.copy(steps = list))
-            finished.value = "Added ${recorded.size} step${if (recorded.size == 1) "" else "s"} from ${s.appName}"
-        } else {
-            finished.value = "Nothing was recorded"
-        }
-        val service = svc
-        stop()
-        service?.bringAppToFront()
-    }
-
-    fun cancel() {
-        val service = svc
-        stop()
-        finished.value = "Recording discarded"
-        service?.bringAppToFront()
-    }
-
-    fun stop() {
-        refreshJob?.cancel()
+    /** Removes the overlays and gives the screen back. Safe to call twice. */
+    private fun close() {
+        if (_state.value == null) return
+        ticker?.cancel()
+        discardTimer?.cancel()
         val wm = svc?.getSystemService(WindowManager::class.java)
         listOf(barView, panelView, hiView).forEach { v -> if (v != null) try { wm?.removeView(v) } catch (_: Exception) {} }
         barView = null; panelView = null; hiView = null
         owner?.destroy()
         owner = null
-        if (session.value != null) svc?.setActive(false)
-        session.value = null
-        options.value = emptyList()
-        selected.value = null
-        typingInto.value = null
-        pendingText = null
+        nodes = emptyMap()
+        typingNode = null
+        _state.value = null
         svc = null
+        Trace.log("Recorder", "closed")
+        Engine.finish(Owner.RECORD)
     }
 
-    // ------------------------------------------------------------------ actions from the overlay
-
-    fun togglePanel() {
-        val open = !panelOpen.value
-        panelOpen.value = open
-        if (open) { liveRecord.value = false; refresh() }
-        updatePanelWindow()
+    fun serviceLost() {
+        if (_state.value == null) return
+        close()
+        finished.value = "Recording stopped — the accessibility service was switched off"
     }
 
-    fun setLive(on: Boolean) {
-        liveRecord.value = on
-        if (on) {
-            panelOpen.value = false
-            updatePanelWindow()
-            message.value = "Use ${session.value?.appName ?: "the app"} normally — your taps and typing are saved"
-        } else {
-            flushText()
-            message.value = "Record my taps: off"
+    // ------------------------------------------------------------------ the one way state changes
+
+    fun send(e: RecEvent) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            scope.launch { send(e) }
+            return
         }
-    }
-
-    fun moveBar() {
-        barOnTop.value = !barOnTop.value
-        val v = barView ?: return
-        val lp = v.layoutParams as? WindowManager.LayoutParams ?: return
-        lp.gravity = (if (barOnTop.value) Gravity.TOP else Gravity.BOTTOM) or Gravity.CENTER_HORIZONTAL
-        try { svc?.getSystemService(WindowManager::class.java)?.updateViewLayout(v, lp) } catch (_: Exception) {}
-    }
-
-    fun undo() {
-        val l = steps.value
-        if (l.isEmpty()) return
-        steps.value = l.dropLast(1)
-        message.value = "Removed the last step (the app itself isn't changed back)"
-    }
-
-    fun select(o: Opt?) { selected.value = o }
-
-    fun refresh() {
-        val service = svc ?: return
-        refreshJob?.cancel()
-        refreshJob = scope.launch {
-            busy.value = true
-            val list = withContext(Dispatchers.Default) { try { collect(service) } catch (_: Exception) { emptyList() } }
-            options.value = list
-            selected.value = null
-            busy.value = false
+        val before = _state.value ?: return
+        val (after, effects) = RecorderMachine.reduce(before, e)
+        _state.value = after
+        Trace.move("Recorder", before.mode.tag, after.mode.tag, e.tag)
+        syncWindows(before, after)
+        if (after.discardArmed && !before.discardArmed) {
+            discardTimer?.cancel()
+            discardTimer = scope.launch { delay(4000); send(RecEvent.DiscardTimeout) }
         }
+        effects.forEach(::perform)
     }
 
-    /** Does [action] in the real app and saves it as a step. */
-    fun choose(o: Opt, action: String) {
-        val service = svc ?: return
-        val s = session.value ?: return
-        val base = o.params + mapOf("pkg" to (o.params[Selector.PKG] ?: s.pkg), "appName" to appNameFor(o.params[Selector.PKG], s))
-        when (action) {
-            "wait" -> {
-                add(Step(type = StepType.WAIT_ELEMENT, label = "Wait for “${o.label}”", p = base + mapOf("mode" to "appear", "timeout" to "60")))
-                message.value = "Saved: wait for “${o.label}”"
-                return
-            }
-            "type" -> {
-                if (o.password) {
-                    message.value = "Password boxes are never recorded — TaskPilot doesn't store passwords."
-                    return
-                }
-                o.node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-                o.node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                typingInto.value = o
-                panelOpen.value = false
-                updatePanelWindow()
-                message.value = "Type in “${o.label}” using the app's keyboard, then tap Save text"
-                return
-            }
-        }
-        scope.launch {
-            ignoreEventsUntil = System.currentTimeMillis() + 1500
-            val reopen = panelOpen.value
-            panelOpen.value = false
-            updatePanelWindow()
-            delay(250)
-            when (action) {
-                "tap", "long" -> {
-                    val long = action == "long"
-                    add(Step(type = StepType.TAP_ELEMENT, label = (if (long) "Long-press" else "Tap") + " “${o.label}”",
-                        p = base + mapOf("timeout" to "20", "coords" to "true", "long" to long.toString())))
-                    if (!service.clickNode(o.node, long)) service.tapNode(o.node, long)
-                    message.value = "Saved: ${if (long) "long-press" else "tap"} “${o.label}”"
-                }
-                "down", "up" -> {
-                    add(Step(type = StepType.SCROLL, label = "Scroll ${o.label} $action", p = base + mapOf("dir" to action, "times" to "1", "timeout" to "15")))
-                    service.scrollNode(o.node, down = action == "down")
-                    message.value = "Saved: scroll $action"
-                }
-            }
-            delay(1300)
-            if (reopen) { panelOpen.value = true; updatePanelWindow() }
-            refresh()
-        }
-    }
-
-    fun phoneKey(key: String) {
-        val service = svc ?: return
-        when (key) {
-            "WAIT" -> {
-                add(Step(type = StepType.DELAY, p = mapOf("seconds" to "2")))
-                message.value = "Saved: wait 2 s"
-                return
-            }
-        }
-        add(Step(type = StepType.SYSTEM_KEY, p = mapOf("key" to key)))
-        scope.launch {
-            ignoreEventsUntil = System.currentTimeMillis() + 1500
-            service.globalKey(key)
-            message.value = "Saved: ${key.lowercase()}"
-            delay(1200)
-            refresh()
-        }
-    }
-
+    /** "Save text" on the bar: read what the user typed into the box. */
     fun saveTyped() {
-        val o = typingInto.value ?: return
-        o.node.refresh()
-        val text = o.node.text?.toString() ?: ""
-        val hint = if (Build.VERSION.SDK_INT >= 26) o.node.hintText?.toString() else null
-        val typed = if (text == hint) "" else text
-        typingInto.value = null
-        if (o.node.isPassword) {
-            message.value = "Password boxes are never recorded."
-        } else {
-            val s = session.value ?: return
-            add(Step(type = StepType.INPUT_TEXT, label = "Type in “${o.label}”",
-                p = o.params + mapOf("pkg" to s.pkg, "appName" to s.appName, "text" to typed, "timeout" to "15")))
-            message.value = "Saved: type “${typed.take(30)}”"
+        val node = typingNode ?: svc?.focusedInput()
+        typingNode = null
+        try { node?.refresh() } catch (_: Exception) {}
+        val text = node?.text?.toString() ?: ""
+        val hint = if (node != null && Build.VERSION.SDK_INT >= 26) node.hintText?.toString() else null
+        send(RecEvent.SaveTyped(if (text == hint) "" else text, password = node?.isPassword == true))
+    }
+
+    private fun perform(fx: RecEffect) {
+        val service = svc ?: return
+        when (fx) {
+            is RecEffect.Perform -> scope.launch {
+                val node = nodes[fx.sig]
+                delay(250)                                  // the panel has just left the screen
+                if (node != null) when (fx.action) {
+                    OptAction.TAP -> if (!service.clickNode(node, false)) service.tapNode(node, false)
+                    OptAction.LONG_PRESS -> if (!service.clickNode(node, true)) service.tapNode(node, true)
+                    OptAction.SCROLL_DOWN -> service.scrollNode(node, down = true)
+                    OptAction.SCROLL_UP -> service.scrollNode(node, down = false)
+                    OptAction.TYPE, OptAction.WAIT_FOR -> {}
+                }
+                afterAction()
+            }
+            is RecEffect.PressKey -> scope.launch {
+                service.globalKey(fx.key)
+                afterAction()
+            }
+            is RecEffect.Focus -> {
+                val node = nodes[fx.sig]
+                typingNode = node
+                node?.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                node?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            }
+            // Skip when the screen was read a moment ago and hasn't changed since.
+            RecEffect.ReadScreen ->
+                if (watch.dirty || watch.lastReadDone == ScreenWatch.NONE || now() - watch.lastReadDone > 500) read()
+            is RecEffect.Commit -> {
+                val s = _state.value?.session
+                val wf = s?.let { Repo.get(it.wfId) }
+                finished.value = if (s != null && wf != null && fx.steps.isNotEmpty()) {
+                    val list = wf.steps.toMutableList()
+                    list.addAll(s.insertAt.coerceIn(0, list.size), fx.steps)
+                    Repo.upsert(wf.copy(steps = list))
+                    "Added ${fx.steps.size} step${if (fx.steps.size == 1) "" else "s"} from ${s.appName}"
+                } else "Nothing was recorded"
+                close()
+                service.bringAppToFront()
+            }
+            RecEffect.Abandon -> {
+                close()
+                finished.value = "Recording discarded"
+                service.bringAppToFront()
+            }
         }
-        panelOpen.value = true
-        updatePanelWindow()
-        refresh()
     }
 
-    fun cancelTyping() {
-        typingInto.value = null
-        panelOpen.value = true
-        updatePanelWindow()
-        refresh()
+    /**
+     * TaskPilot just did something in the app. Wait until the app has stopped changing and its new
+     * screen has been read (the ticker does the reading), then report [RecEvent.ActionDone] —
+     * at least 0.7 s (a tap needs a moment to show anything), at most 6 s (a page that never rests).
+     */
+    private suspend fun afterAction() {
+        val t0 = now()
+        watch = watch.event(t0)
+        while (_state.value != null) {
+            delay(150)
+            val waited = now() - t0
+            if (waited >= 6000 || (waited >= 700 && watch.settled(now()))) break
+        }
+        send(RecEvent.ActionDone)
     }
 
-    private fun add(step: Step) { steps.value = steps.value + step }
+    // ------------------------------------------------------------------ following the screen
 
-    private fun appNameFor(pkg: String?, s: Session): String =
-        if (pkg.isNullOrBlank() || pkg == s.pkg) s.appName
-        else svc?.let { com.taskpilot.app.ui.AppIcons.label(it, pkg) } ?: pkg
+    private fun startTicker() {
+        ticker?.cancel()
+        ticker = scope.launch {
+            while (isActive) {
+                delay(200)
+                val st = _state.value ?: break
+                if (st.mode != RecMode.Opening && watch.due(now(), heartbeat = st.panelOpen)) read()
+            }
+        }
+    }
 
-    // ------------------------------------------------------------------ "Record my taps"
+    /** Reads the options of the screen in front (off the main thread) and reports them. */
+    private fun read() {
+        val service = svc ?: return
+        val session = _state.value?.session ?: return
+        if (watch.reading) return
+        watch = watch.readStarted(now())
+        send(RecEvent.ReadStarted)
+        val gen = generation
+        scope.launch {
+            val (options, map) = withContext(Dispatchers.Default) {
+                try { collect(service, session) } catch (_: Exception) { emptyList<ScreenOption>() to emptyMap<String, AccessibilityNodeInfo>() }
+            }
+            if (gen != generation || _state.value == null) return@launch
+            watch = watch.readDone(now())
+            nodes = map
+            send(RecEvent.ScreenRead(options))
+        }
+    }
 
+    /** Called by the accessibility service for every screen event while the recorder is open. */
     fun onEvent(service: AutomationService, e: AccessibilityEvent) {
-        if (!liveRecord.value || session.value == null) return
-        if (System.currentTimeMillis() < ignoreEventsUntil) return
-        val pkg = e.packageName?.toString() ?: return
-        if (pkg == service.packageName || pkg == "com.android.systemui") return
+        val st = _state.value ?: return
+        val pkg = e.packageName?.toString()
+        if (pkg == service.packageName) return                       // our own bar and panel
+        when (e.eventType) {
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+            AccessibilityEvent.TYPE_WINDOWS_CHANGED,
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
+            AccessibilityEvent.TYPE_VIEW_SCROLLED,
+            AccessibilityEvent.TYPE_VIEW_CLICKED,
+            -> watch = watch.event(now())                            // the app's screen is changing
+        }
+        if (st.mode != RecMode.Watching) return
+        if (pkg == null || pkg == "com.android.systemui") return
         val src = e.source ?: return
         when (e.eventType) {
             AccessibilityEvent.TYPE_VIEW_CLICKED, AccessibilityEvent.TYPE_VIEW_LONG_CLICKED -> {
-                if (src.isEditable) return                         // tapping into a box: the typing is what matters
-                flushText()
-                val long = e.eventType == AccessibilityEvent.TYPE_VIEW_LONG_CLICKED
+                if (src.isEditable) return                           // tapping into a box: the typing is what matters
                 val label = labelOf(src)
-                val s = session.value ?: return
                 val size = service.screenSize()
-                add(Step(type = StepType.TAP_ELEMENT, label = (if (long) "Long-press" else "Tap") + " “$label”",
-                    p = paramsFor(src, label, size.x, size.y) + mapOf("pkg" to pkg, "appName" to appNameFor(pkg, s),
-                        "timeout" to "20", "coords" to "true", "long" to long.toString())))
-                message.value = "Saved: tap “$label”"
+                send(
+                    RecEvent.UserTapped(
+                        paramsFor(src, label, size.x, size.y) + mapOf("pkg" to pkg, "appName" to appName(service, pkg, st.session)),
+                        label,
+                        long = e.eventType == AccessibilityEvent.TYPE_VIEW_LONG_CLICKED,
+                    ),
+                )
             }
             AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
-                if (e.isPassword || src.isPassword) { pendingText = null; return }
+                val label = labelOf(src)
                 val size = service.screenSize()
-                val text = e.text?.joinToString("") ?: src.text?.toString() ?: ""
-                pendingText = paramsFor(src, labelOf(src), size.x, size.y) + mapOf("pkg" to pkg) to text
+                val password = e.isPassword || src.isPassword
+                send(
+                    RecEvent.UserTyped(
+                        paramsFor(src, label, size.x, size.y) + mapOf("pkg" to pkg, "appName" to appName(service, pkg, st.session)),
+                        label,
+                        text = if (password) "" else e.text?.joinToString("") ?: src.text?.toString() ?: "",
+                        password = password,
+                    ),
+                )
             }
         }
     }
 
-    private fun flushText() {
-        val (p, text) = pendingText ?: return
-        pendingText = null
-        val s = session.value ?: return
-        add(Step(type = StepType.INPUT_TEXT, label = "Type in “${p[Selector.LABEL] ?: "text box"}”",
-            p = p + mapOf("appName" to appNameFor(p["pkg"], s), "text" to text, "timeout" to "15")))
-        message.value = "Saved: type “${text.take(30)}”"
-    }
+    private fun appName(service: AutomationService, pkg: String?, s: RecSession): String =
+        if (pkg.isNullOrBlank() || pkg == s.pkg) s.appName else AppIcons.label(service, pkg) ?: pkg
 
     // ------------------------------------------------------------------ reading the screen
 
@@ -411,7 +375,8 @@ object Recorder {
         )
     }
 
-    private fun collect(service: AutomationService): List<Opt> {
+    /** Everything that can be automated on the screen in front, top to bottom, with its live node. */
+    private fun collect(service: AutomationService, session: RecSession): Pair<List<ScreenOption>, Map<String, AccessibilityNodeInfo>> {
         val size = service.screenSize()
         val screenArea = size.x.toLong() * size.y
         val own = service.packageName
@@ -421,17 +386,12 @@ object Recorder {
             .filter { val p = it.packageName?.toString(); p != own && p != "com.android.systemui" }
             .ifEmpty { service.roots(null).filter { it.packageName?.toString() != own } }
 
-        val out = ArrayList<Opt>()
+        class Found(val node: AccessibilityNodeInfo, val kind: OptKind, val box: Rect)
+        val found = ArrayList<Found>()
         val seen = HashSet<String>()
         var visited = 0
-        fun add(n: AccessibilityNodeInfo, kind: Kind, r: Rect) {
-            val sig = "${kind.name}:${r.flattenToString()}"
-            if (!seen.add(sig)) return
-            val label = labelOf(n) + if (kind == Kind.TOGGLE) (if (n.isChecked) " (on)" else " (off)") else ""
-            val idShort = n.viewIdResourceName?.substringAfter(":id/", "").orEmpty()
-            val cls = n.className?.toString()?.substringAfterLast('.').orEmpty()
-            val detail = listOf(idShort, cls).filter { it.isNotBlank() }.joinToString(" · ")
-            out += Opt(out.size, kind, label, detail, Rect(r), paramsFor(n, label.removeSuffix(" (on)").removeSuffix(" (off)"), size.x, size.y), n, n.isPassword)
+        fun add(n: AccessibilityNodeInfo, kind: OptKind, r: Rect) {
+            if (seen.add("${kind.name}:${r.flattenToString()}")) found += Found(n, kind, Rect(r))
         }
         fun walk(n: AccessibilityNodeInfo, depth: Int) {
             if (++visited > 5000 || depth > 60) return
@@ -443,12 +403,12 @@ object Recorder {
                     val huge = r.width().toLong() * r.height() > screenArea * 0.8
                     val cls = n.className?.toString().orEmpty()
                     when {
-                        n.isEditable -> add(n, Kind.FIELD, r)
-                        n.isCheckable -> add(n, Kind.TOGGLE, r)
+                        n.isEditable -> add(n, OptKind.FIELD, r)
+                        n.isCheckable -> add(n, OptKind.TOGGLE, r)
                         clickable && !(huge && !labelled) ->
-                            add(n, if (labelled || cls.contains("Button") || cls.contains("ImageView")) Kind.BUTTON else Kind.ITEM, r)
+                            add(n, if (labelled || cls.contains("Button") || cls.contains("ImageView")) OptKind.BUTTON else OptKind.ITEM, r)
                     }
-                    if (n.isScrollable) add(n, Kind.SCROLL, r)
+                    if (n.isScrollable) add(n, OptKind.SCROLL, r)
                 }
             }
             for (i in 0 until n.childCount) {
@@ -457,7 +417,33 @@ object Recorder {
             }
         }
         roots.forEach { walk(it, 0) }
-        return out.sortedWith(compareBy<Opt>({ it.bounds.top / 24 }, { it.bounds.left })).mapIndexed { i, o -> o.copy(key = i) }.take(250)
+
+        val options = ArrayList<ScreenOption>()
+        val map = HashMap<String, AccessibilityNodeInfo>()
+        val twins = HashMap<String, Int>()
+        for (f in found.sortedWith(compareBy<Found>({ it.box.top / 24 }, { it.box.left })).take(250)) {
+            val n = f.node
+            val label = labelOf(n)
+            val idShort = n.viewIdResourceName?.substringAfter(":id/", "").orEmpty()
+            val cls = n.className?.toString()?.substringAfterLast('.').orEmpty()
+            val pkg = n.packageName?.toString().orEmpty()
+            // Identity that survives a re-read and a scroll: what it is, not where it is.
+            val base = "${f.kind.name}|$idShort|$label"
+            val nth = (twins[base] ?: 0) + 1
+            twins[base] = nth
+            val sig = if (nth == 1) base else "$base#$nth"
+            options += ScreenOption(
+                sig = sig,
+                kind = f.kind,
+                label = label + if (f.kind == OptKind.TOGGLE) (if (n.isChecked) " (on)" else " (off)") else "",
+                detail = listOf(idShort, cls).filter { it.isNotBlank() }.joinToString(" · "),
+                left = f.box.left, top = f.box.top, right = f.box.right, bottom = f.box.bottom,
+                params = paramsFor(n, label, size.x, size.y) + mapOf("pkg" to pkg, "appName" to appName(service, pkg, session)),
+                password = n.isPassword,
+            )
+            map[sig] = n
+        }
+        return options to map
     }
 
     // ------------------------------------------------------------------ overlay windows
@@ -490,23 +476,27 @@ object Recorder {
                     .apply { y = (30 * service.resources.displayMetrics.density).toInt() })
             } catch (_: Exception) {}
         }
-        updatePanelWindow()
     }
 
-    private fun updatePanelWindow() {
+    /** The windows are a picture of the state: the panel exists exactly while the mode is Choosing. */
+    private fun syncWindows(before: RecState, after: RecState) {
         val service = svc ?: return
         val wm = service.getSystemService(WindowManager::class.java) ?: return
         val o = owner ?: return
-        val want = panelOpen.value && typingInto.value == null
-        if (want && panelView == null) {
+        if (after.panelOpen && panelView == null) {
             val h = (service.screenSize().y * 0.52f).toInt()
             panelView = compose(service, o) { RecorderPanel() }.also {
                 try { wm.addView(it, lp(WindowManager.LayoutParams.MATCH_PARENT, h, Gravity.BOTTOM, true)) } catch (_: Exception) {}
             }
-        } else if (!want && panelView != null) {
+        } else if (!after.panelOpen && panelView != null) {
             try { wm.removeView(panelView) } catch (_: Exception) {}
             panelView = null
-            selected.value = null
+        }
+        if (before.barOnTop != after.barOnTop) {
+            val v = barView ?: return
+            val p = v.layoutParams as? WindowManager.LayoutParams ?: return
+            p.gravity = (if (after.barOnTop) Gravity.TOP else Gravity.BOTTOM) or Gravity.CENTER_HORIZONTAL
+            try { wm.updateViewLayout(v, p) } catch (_: Exception) {}
         }
     }
 

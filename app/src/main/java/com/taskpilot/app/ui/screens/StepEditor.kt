@@ -50,6 +50,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -73,10 +74,9 @@ import com.taskpilot.app.data.Selector
 import com.taskpilot.app.data.Step
 import com.taskpilot.app.data.StepType
 import com.taskpilot.app.data.Templates
-import com.taskpilot.app.engine.AutomationService
-import com.taskpilot.app.engine.CaptureStore
+import com.taskpilot.app.core.CaptureOutcome
+import com.taskpilot.app.engine.Capture
 import com.taskpilot.app.engine.FileOps
-import com.taskpilot.app.engine.Runner
 import com.taskpilot.app.ui.AppIcon
 import com.taskpilot.app.ui.AppIcons
 import com.taskpilot.app.ui.IconBadge
@@ -97,8 +97,6 @@ private val StepSaver = Saver<Step, String>(
     restore = { Repo.json.decodeFromString<Step>(it) },
 )
 
-private enum class Picker { FOLDER, FILE, APP }
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StepEditorScreen(s: Screen.StepEdit, nav: Nav) {
@@ -116,12 +114,12 @@ fun StepEditorScreen(s: Screen.StepEdit, nav: Nav) {
     val isNew = s.stepId == null
     val index = if (isNew) s.insertAt.coerceIn(0, wf.steps.size) else wf.steps.indexOfFirst { it.id == original.id }.coerceAtLeast(0)
     var draft by rememberSaveable(stateSaver = StepSaver) { mutableStateOf(original) }
-    var picker by remember { mutableStateOf<Picker?>(null) }
-    var pickerKey by remember { mutableStateOf("") }
-    var confirmLeave by remember { mutableStateOf(false) }
-    var captureAsk by remember { mutableStateOf(false) }
-    var expectingCapture by rememberSaveable { mutableStateOf(false) }
-    val capture by CaptureStore.result.collectAsState()
+    // One dialog at a time. (A picker used to be two variables — which picker, and for which
+    // setting — plus two more flags for the other dialogs.)
+    var dialog by remember { mutableStateOf<StepDialog?>(null) }
+    // The answer of "Pick on screen", if it is addressed to this step.
+    val captureOutcome by Capture.outcome.collectAsState()
+    val capture = captureOutcome?.takeIf { it.stepId == draft.id }
     val info = StepCatalog.info(draft.type)
     val dirty = draft != original || isNew
 
@@ -134,11 +132,12 @@ fun StepEditorScreen(s: Screen.StepEdit, nav: Nav) {
         nav.pop()
     }
 
-    fun leave() { if (dirty && !isNew && draft != original) confirmLeave = true else nav.pop() }
+    fun leave() { if (dirty && !isNew && draft != original) dialog = StepDialog.ConfirmLeave else nav.pop() }
 
     BackHandler { leave() }
 
-    fun openPicker(p: Picker, key: String) { picker = p; pickerKey = key }
+    fun openPicker(p: Picker, key: String) { dialog = StepDialog.Pick(p, key) }
+    val askCapture = { dialog = StepDialog.AskCapture }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -237,7 +236,7 @@ fun StepEditorScreen(s: Screen.StepEdit, nav: Nav) {
                     SectionLabel("Which app")
                     AppCard(draft.s("pkg"), draft.s("appName"), emptyText = "Any app") { openPicker(Picker.APP, "pkg") }
                     SectionLabel(if (draft.type == StepType.INPUT_TEXT) "Text box (optional)" else "Element on screen")
-                    ElementCard(Selector.from(draft), onPick = { captureAsk = true }, onClear = {
+                    ElementCard(Selector.from(draft), onPick = askCapture, onClear = {
                         draft = draft.copy(p = draft.p - Selector.KEYS.toSet())
                     })
                     if (draft.type == StepType.INPUT_TEXT) {
@@ -315,7 +314,7 @@ fun StepEditorScreen(s: Screen.StepEdit, nav: Nav) {
                     SectionLabel("Which app")
                     AppCard(draft.s("pkg"), draft.s("appName"), emptyText = "Any app") { openPicker(Picker.APP, "pkg") }
                     SectionLabel("List or page to scroll (optional)")
-                    ElementCard(Selector.from(draft), onPick = { captureAsk = true }, onClear = {
+                    ElementCard(Selector.from(draft), onPick = askCapture, onClear = {
                         draft = draft.copy(p = draft.p - Selector.KEYS.toSet())
                     })
                     Hint("Leave it empty to scroll the middle of the screen.")
@@ -441,105 +440,96 @@ fun StepEditorScreen(s: Screen.StepEdit, nav: Nav) {
         }
     }
 
-    // ---------------- pickers
-    when (picker) {
-        Picker.FOLDER -> FileBrowserDialog(
-            start = draft.s(pickerKey).ifBlank { FileOps.root.absolutePath + "/Download" },
-            pickFile = false,
-            onDismiss = { picker = null },
-        ) { path -> draft = draft.put(pickerKey, path); picker = null }
+    // ---------------- dialogs
+    when (val d = dialog) {
+        is StepDialog.Pick -> when (d.kind) {
+            Picker.FOLDER, Picker.FILE -> FileBrowserDialog(
+                start = draft.s(d.key).ifBlank { FileOps.root.absolutePath + "/Download" },
+                pickFile = d.kind == Picker.FILE,
+                onDismiss = { dialog = null },
+            ) { path -> draft = draft.put(d.key, path); dialog = null }
 
-        Picker.FILE -> FileBrowserDialog(
-            start = draft.s(pickerKey).ifBlank { FileOps.root.absolutePath + "/Download" },
-            pickFile = true,
-            onDismiss = { picker = null },
-        ) { path -> draft = draft.put(pickerKey, path); picker = null }
-
-        Picker.APP -> AppPickerDialog(onDismiss = { picker = null }) { pkg, label ->
-            draft = draft.putAll(mapOf(pickerKey to pkg, "appName" to label))
-            if (draft.type == StepType.TAP_ELEMENT || draft.type == StepType.WAIT_ELEMENT || draft.type == StepType.INPUT_TEXT || draft.type == StepType.SCROLL) {
-                draft = draft.put(Selector.PKG, pkg)
+            Picker.APP -> AppPickerDialog(onDismiss = { dialog = null }) { pkg, label ->
+                draft = draft.putAll(mapOf(d.key to pkg, "appName" to label))
+                if (draft.type == StepType.TAP_ELEMENT || draft.type == StepType.WAIT_ELEMENT || draft.type == StepType.INPUT_TEXT || draft.type == StepType.SCROLL) {
+                    draft = draft.put(Selector.PKG, pkg)
+                }
+                dialog = null
             }
-            picker = null
         }
+
+        StepDialog.AskCapture -> {
+            val app = draft.s("appName").ifBlank { "the app" }
+            val pkg = draft.s("pkg")
+            val canRunBefore = index > 0
+            // Capture.start() says why it can't start (service off, something else running…).
+            fun start(runFirst: Boolean) {
+                dialog = null
+                Capture.start(ctx, draft.id, pkg, wfId = wf.id, runFirst = if (runFirst) index else null)?.let { toast(it.message) }
+            }
+            AlertDialog(
+                onDismissRequest = { dialog = null },
+                icon = { Icon(Icons.Rounded.TouchApp, null) },
+                title = { Text("Pick on screen") },
+                text = {
+                    Text(
+                        "TaskPilot will switch to $app and show a small floating bar.\n\n" +
+                            "Go to the screen that has the button (for Pydroid, the editor with your script open), then tap “◉ Capture”. " +
+                            "You'll come back here and simply tap the button on a picture of that screen." +
+                            if (canRunBefore) "\n\nTip: “Run steps 1–$index first” gets you to the right screen automatically." else "",
+                    )
+                },
+                confirmButton = {
+                    Column(horizontalAlignment = Alignment.End) {
+                        if (canRunBefore) TextButton(onClick = { start(runFirst = true) }) { Text("Run steps 1–$index first") }
+                        TextButton(onClick = { start(runFirst = false) }) { Text(if (pkg.isNotBlank()) "Open $app now" else "Start capture") }
+                    }
+                },
+                dismissButton = { TextButton(onClick = { dialog = null }) { Text("Cancel") } },
+            )
+        }
+
+        StepDialog.ConfirmLeave -> AlertDialog(
+            onDismissRequest = { dialog = null },
+            title = { Text("Discard changes?") },
+            text = { Text("Your edits to this step haven't been saved.") },
+            confirmButton = { TextButton(onClick = { dialog = null; commit() }) { Text("Save") } },
+            dismissButton = { TextButton(onClick = { dialog = null; nav.pop() }) { Text("Discard") } },
+        )
 
         null -> {}
     }
 
-    if (captureAsk) {
-        val app = draft.s("appName").ifBlank { "the app" }
-        val pkg = draft.s("pkg")
-        val canRunBefore = index > 0
-        AlertDialog(
-            onDismissRequest = { captureAsk = false },
-            icon = { Icon(Icons.Rounded.TouchApp, null) },
-            title = { Text("Pick on screen") },
-            text = {
-                Text(
-                    "TaskPilot will switch to $app and show a small floating bar.\n\n" +
-                        "Go to the screen that has the button (for Pydroid, the editor with your script open), then tap “◉ Capture”. " +
-                        "You'll come back here and simply tap the button on a picture of that screen." +
-                        if (canRunBefore) "\n\nTip: “Run steps 1–$index first” gets you to the right screen automatically." else "",
-                )
-            },
-            confirmButton = {
-                Column(horizontalAlignment = Alignment.End) {
-                    if (canRunBefore) {
-                        TextButton(onClick = {
-                            captureAsk = false
-                            if (AutomationService.instance == null) {
-                                toast("Turn on the accessibility service in Setup first")
-                            } else {
-                                expectingCapture = true
-                                val err = Runner.launch(ctx, wf.id, "Capture", endExclusive = index, after = { svc -> svc.beginCapture(pkg, launch = false) })
-                                if (err != null) {
-                                    expectingCapture = false
-                                    toast(err)
-                                }
-                            }
-                        }) { Text("Run steps 1–$index first") }
-                    }
-                    TextButton(onClick = {
-                        captureAsk = false
-                        val svc = AutomationService.instance
-                        if (svc == null) {
-                            toast("Turn on the accessibility service in Setup first")
-                        } else {
-                            expectingCapture = true
-                            svc.beginCapture(pkg, launch = pkg.isNotBlank())
-                        }
-                    }) { Text(if (pkg.isNotBlank()) "Open $app now" else "Start capture") }
+    // ---------------- the answer of "Pick on screen"
+    when (capture) {
+        is CaptureOutcome.Ready -> {
+            val cap = capture.result
+            ElementPickerDialog(res = cap, onDismiss = { Capture.consume() }) { el ->
+                var d = draft.putAll(el.toParams(cap.screenW, cap.screenH))
+                if (d.s("pkg").isBlank() && el.pkg.isNotBlank()) {
+                    d = d.putAll(mapOf("pkg" to el.pkg, "appName" to (AppIcons.label(ctx, el.pkg) ?: el.pkg)))
                 }
-            },
-            dismissButton = { TextButton(onClick = { captureAsk = false }) { Text("Cancel") } },
-        )
-    }
-
-    val cap = capture
-    if (expectingCapture && cap != null) {
-        ElementPickerDialog(
-            res = cap,
-            onDismiss = { expectingCapture = false; CaptureStore.result.value = null },
-        ) { el ->
-            var d = draft.putAll(el.toParams(cap.screenW, cap.screenH))
-            if (d.s("pkg").isBlank() && el.pkg.isNotBlank()) {
-                d = d.putAll(mapOf("pkg" to el.pkg, "appName" to (AppIcons.label(ctx, el.pkg) ?: el.pkg)))
+                draft = d
+                Capture.consume()
             }
-            draft = d
-            expectingCapture = false
-            CaptureStore.result.value = null
         }
+        is CaptureOutcome.Failed -> LaunchedEffect(capture) {
+            toast(capture.reason)
+            Capture.consume()
+        }
+        is CaptureOutcome.Cancelled -> LaunchedEffect(capture) { Capture.consume() }
+        null -> {}
     }
+}
 
-    if (confirmLeave) {
-        AlertDialog(
-            onDismissRequest = { confirmLeave = false },
-            title = { Text("Discard changes?") },
-            text = { Text("Your edits to this step haven't been saved.") },
-            confirmButton = { TextButton(onClick = { confirmLeave = false; commit() }) { Text("Save") } },
-            dismissButton = { TextButton(onClick = { confirmLeave = false; nav.pop() }) { Text("Discard") } },
-        )
-    }
+private enum class Picker { FOLDER, FILE, APP }
+
+/** The dialogs of the step editor — at most one is open. */
+private sealed interface StepDialog {
+    /** A folder / file / app picker filling the setting [key]. */
+    data class Pick(val kind: Picker, val key: String) : StepDialog
+    data object AskCapture : StepDialog
+    data object ConfirmLeave : StepDialog
 }
 
 // ============================================================ form pieces

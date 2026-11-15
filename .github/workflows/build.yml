@@ -2,7 +2,8 @@ name: Build APK
 
 on:
   push:
-    branches: [main]
+    # main → build, test and publish a Release.  ci/** → build and test only (try things safely).
+    branches: [main, "ci/**"]
   workflow_dispatch:
 
 permissions:
@@ -23,10 +24,17 @@ jobs:
         with:
           gradle-version: "8.9"
 
-      - name: Build
+      # core/ holds the state machines as plain Kotlin so they can be unit-tested anywhere.
+      - name: core/ must stay free of Android imports
+        run: |
+          if grep -rnE "^import (android|androidx)\." app/src/main/java/com/taskpilot/app/core; then
+            echo "::error::core/ must not import android.* or androidx.* (see AGENTS.md)"; exit 1
+          fi
+
+      - name: Unit tests + build
         run: |
           set -o pipefail
-          gradle assembleDebug assembleRelease --no-daemon --console=plain 2>&1 | tee build.log
+          gradle testDebugUnitTest assembleDebug assembleRelease --no-daemon --console=plain 2>&1 | tee build.log
 
       - name: Report errors 1-10
         if: failure()
@@ -58,6 +66,7 @@ jobs:
 
       # A release gives a direct download link that works from the phone's browser.
       - uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main'
         with:
           tag_name: v${{ env.VERSION_NAME }}-build${{ github.run_number }}
           name: TaskPilot ${{ env.VERSION_NAME }} (build ${{ github.run_number }})

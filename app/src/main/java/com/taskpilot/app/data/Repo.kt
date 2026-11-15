@@ -1,6 +1,8 @@
 package com.taskpilot.app.data
 
 import android.content.Context
+import com.taskpilot.app.core.RunStatus
+import com.taskpilot.app.core.Trace
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.serialization.decodeFromString
@@ -25,6 +27,15 @@ object Repo {
     private val _runs = MutableStateFlow<List<RunRecord>>(emptyList())
     val runs: StateFlow<List<RunRecord>> = _runs
 
+    private val _loadProblem = MutableStateFlow<String?>(null)
+
+    /**
+     * Set when a saved file could not be read at start-up. "Couldn't load" used to look exactly
+     * like "nothing saved yet" — and the next save then wrote an empty list over the real file.
+     * Now the unreadable file is first copied aside, and Home shows this message.
+     */
+    val loadProblem: StateFlow<String?> = _loadProblem
+
     private val wfFile get() = File(dir, "workflows.json")
     private val runFile get() = File(dir, "runs.json")
 
@@ -37,7 +48,18 @@ object Repo {
     private inline fun <reified T> read(f: File): T? = try {
         if (f.exists()) json.decodeFromString<T>(f.readText()) else null
     } catch (e: Exception) {
+        setAside(f, e)
         null
+    }
+
+    /** Keeps a copy of a file that couldn't be read, so nothing is lost when the app saves again. */
+    private fun setAside(f: File, e: Exception) {
+        val copy = File(f.parentFile, "${f.name}.unreadable-${System.currentTimeMillis()}")
+        val kept = try { f.copyTo(copy, overwrite = true); true } catch (_: Exception) { false }
+        Trace.log("Repo", "could not read ${f.name}: ${e.javaClass.simpleName}; copy kept=$kept")
+        _loadProblem.value = "TaskPilot couldn't read ${f.name} (${e.javaClass.simpleName})." +
+            if (kept) " A copy was kept as ${copy.name} inside the app, so it can be recovered — use History → Copy report and ask for help."
+            else " Please use History → Copy report and ask for help before changing anything."
     }
 
     private inline fun <reified T> write(f: File, value: T) {
@@ -75,7 +97,7 @@ object Repo {
         write(wfFile, list)
     }
 
-    fun markRun(id: String, at: Long, status: String) {
+    fun markRun(id: String, at: Long, status: RunStatus) {
         val wf = get(id) ?: return
         upsert(wf.copy(lastRunAt = at, lastStatus = status))
     }

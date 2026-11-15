@@ -9,6 +9,10 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import com.taskpilot.app.core.Trace
+import com.taskpilot.app.core.UpdateState
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import java.io.File
 
 /**
@@ -24,6 +28,19 @@ import java.io.File
  */
 object Updater {
     const val ACTION_STATUS = "com.taskpilot.app.INSTALL_STATUS"
+
+    private val _state = MutableStateFlow<UpdateState>(UpdateState.Idle)
+
+    /** Where an update is right now — set here and by [InstallReceiver] when Android answers. */
+    val state: StateFlow<UpdateState> = _state
+
+    internal fun set(next: UpdateState) {
+        Trace.move("Update", _state.value::class.simpleName ?: "?", next::class.simpleName ?: "?", "set")
+        _state.value = next
+    }
+
+    /** A file was picked that can't be installed. */
+    fun reject(reason: String) = set(UpdateState.Rejected(reason))
 
     data class Candidate(val file: File, val versionName: String, val versionCode: Long)
 
@@ -65,9 +82,13 @@ object Updater {
     fun allowInstallIntent(ctx: Context): Intent =
         Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${ctx.packageName}"))
 
-    /** Starts the install. Returns null when Android's confirmation is on its way, else a reason. */
-    fun install(ctx: Context, c: Candidate): String? {
-        if (!canInstall(ctx)) return "Allow TaskPilot to install updates first."
+    /** Starts the install; progress and the result show up in [state]. Call off the main thread. */
+    fun install(ctx: Context, c: Candidate) {
+        if (!canInstall(ctx)) {
+            set(UpdateState.NeedsPermission)
+            return
+        }
+        set(UpdateState.Preparing(c.file.name))
         val pkgInstaller = ctx.packageManager.packageInstaller
         val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
             setAppPackageName(ctx.packageName)
@@ -75,7 +96,7 @@ object Updater {
             if (Build.VERSION.SDK_INT >= 31) setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED)
             if (Build.VERSION.SDK_INT >= 26) setInstallReason(PackageManager.INSTALL_REASON_USER)
         }
-        return try {
+        try {
             val id = pkgInstaller.createSession(params)
             pkgInstaller.openSession(id).use { session ->
                 c.file.inputStream().use { input ->
@@ -93,9 +114,9 @@ object Updater {
                 )
                 session.commit(pi.intentSender)
             }
-            null
+            set(UpdateState.Confirming)
         } catch (e: Exception) {
-            "Couldn't start the update: ${e.message ?: e.javaClass.simpleName}"
+            set(UpdateState.Failed(e.message ?: e.javaClass.simpleName))
         }
     }
 }
@@ -109,6 +130,7 @@ class InstallReceiver : BroadcastReceiver() {
                 val confirm = if (Build.VERSION.SDK_INT >= 33)
                     intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)
                 else intent.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
+                Updater.set(UpdateState.Confirming)
                 confirm?.let {
                     try { ctx.startActivity(it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } catch (_: Exception) {}
                 }
@@ -124,6 +146,7 @@ class InstallReceiver : BroadcastReceiver() {
                     PackageInstaller.STATUS_FAILURE_STORAGE -> "Not enough storage space."
                     else -> msg
                 }
+                Updater.set(UpdateState.Failed(hint))
                 Notifier.post(ctx, Notifier.CH_ALERTS, "TaskPilot update failed", hint)
             }
         }
