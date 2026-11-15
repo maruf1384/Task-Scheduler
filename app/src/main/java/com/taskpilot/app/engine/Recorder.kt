@@ -83,6 +83,9 @@ object Recorder {
     private var discardTimer: Job? = null
     private var watch = ScreenWatch()
 
+    /** Counts recorder sessions, so a slow screen read from a closed session can't land in the next one. */
+    private var generation = 0
+
     /** The live screen nodes behind the options of the last read, by [ScreenOption.sig]. */
     private var nodes: Map<String, AccessibilityNodeInfo> = emptyMap()
     private var typingNode: AccessibilityNodeInfo? = null
@@ -99,6 +102,7 @@ object Recorder {
     fun start(service: AutomationService, session: RecSession, addOpenStep: Boolean): Refusal? {
         Engine.start(EngineMode.Recording(session.pkg, session.appName))?.let { return it }
         svc = service
+        generation++
         watch = ScreenWatch()
         nodes = emptyMap()
         typingNode = null
@@ -254,12 +258,13 @@ object Recorder {
         if (watch.reading) return
         watch = watch.readStarted(now())
         send(RecEvent.ReadStarted)
+        val gen = generation
         scope.launch {
             val (options, map) = withContext(Dispatchers.Default) {
                 try { collect(service, session) } catch (_: Exception) { emptyList<ScreenOption>() to emptyMap<String, AccessibilityNodeInfo>() }
             }
+            if (gen != generation || _state.value == null) return@launch
             watch = watch.readDone(now())
-            if (_state.value == null) return@launch
             nodes = map
             send(RecEvent.ScreenRead(options))
         }
