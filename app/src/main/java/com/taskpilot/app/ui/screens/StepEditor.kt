@@ -127,7 +127,12 @@ fun StepEditorScreen(s: Screen.StepEdit, nav: Nav) {
         val latest = Repo.get(wf.id) ?: return
         val steps = latest.steps.toMutableList()
         val i = steps.indexOfFirst { it.id == draft.id }
-        if (i >= 0) steps[i] = draft else steps.add(index.coerceIn(0, steps.size), draft)
+        if (i >= 0) steps[i] = draft else {
+            val at = index.coerceIn(0, steps.size)
+            steps.add(at, draft)
+            // A new If / Repeat comes with its End, so the list always fits together.
+            if (StepCatalog.opensBlock(draft.type)) steps.add(at + 1, Step(type = StepType.END))
+        }
         Repo.upsert(latest.copy(steps = steps))
         nav.pop()
     }
@@ -426,7 +431,14 @@ fun StepEditorScreen(s: Screen.StepEdit, nav: Nav) {
                     SectionLabel("About")
                     Hint("Turns the screen off and locks the phone — handy as the last step of a night-time run.")
                 }
+
+                StepType.IF -> IfSection(draft) { draft = it }
+                StepType.REPEAT -> RepeatSection(draft) { draft = it }
+                StepType.STOP -> StopSection(draft) { draft = it }
+                StepType.ELSE, StepType.END -> MarkerSection(isElse = draft.type == StepType.ELSE)
             }
+
+            if (!StepCatalog.isLogic(draft.type)) OnFailSection(draft) { draft = it }
 
             SectionLabel("Name (optional)")
             OutlinedTextField(

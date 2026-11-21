@@ -28,6 +28,10 @@
     <!-- Results -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- "If internet is connected": only READS whether the phone is online. TaskPilot still has no
+         INTERNET permission, so it cannot send anything anywhere. Granted without a prompt. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
     <!-- App picker: list installed apps (Pydroid 3, WhatsApp, ...) -->
     <uses-permission
         android:name="android.permission.QUERY_ALL_PACKAGES"

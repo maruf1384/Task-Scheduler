@@ -32,6 +32,9 @@ object StepExec {
             .replace("{time}", now.format(DateTimeFormatter.ofPattern("h:mm a")))
             .replace("{count}", rc.files.size.toString())
             .replace("{files}", rc.files.joinToString(", ") { it.name })
+            .replace("{loop.index}", rc.loopRound.toString())
+            .replace("{loop.count}", rc.loopTotal.toString())
+            .replace("{loop.file}", rc.files.singleOrNull()?.name ?: "")
     }
 
     private fun installed(ctx: Context, pkg: String): Boolean = try {
@@ -70,6 +73,8 @@ object StepExec {
             ok("Notification shown")
         }
         StepType.LOCK_SCREEN -> if (svc.lockScreen()) ok("Screen locked") else fail("Locking needs Android 9 or newer")
+        // If / Otherwise / End / Repeat / Stop are run by core/FlowMachine through Runner, never here.
+        StepType.IF, StepType.ELSE, StepType.END, StepType.REPEAT, StepType.STOP -> ok()
     }
 
     // -------------------------------------------------------------------------------------

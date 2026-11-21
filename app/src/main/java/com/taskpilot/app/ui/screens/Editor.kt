@@ -27,6 +27,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.AltRoute
+import androidx.compose.material.icons.rounded.UnfoldLess
 import androidx.compose.material.icons.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.ArrowUpward
@@ -89,6 +91,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.taskpilot.app.core.BlockEdits
+import com.taskpilot.app.core.Blocks
 import com.taskpilot.app.core.EngineMode
 import com.taskpilot.app.core.RunStatus
 import com.taskpilot.app.core.Trigger
@@ -273,43 +277,44 @@ fun EditorScreen(wfId: String, nav: Nav) {
                     }
                 }
             }
+            val blocks = Blocks.of(wf.steps)
             itemsIndexed(wf.steps, key = { _, s -> s.id }) { i, step ->
+                fun deleted(what: String, after: List<Step>) {
+                    val before = wf
+                    save(wf.copy(steps = after))
+                    scope.launch {
+                        snack.currentSnackbarData?.dismiss()
+                        val r = snack.showSnackbar(what, actionLabel = "Undo", withDismissAction = true)
+                        if (r == SnackbarResult.ActionPerformed) save(Repo.get(before.id)?.copy(steps = before.steps) ?: before)
+                    }
+                }
                 StepRow(
                     index = i,
                     step = step,
                     isFirst = i == 0,
                     isLast = i == wf.steps.lastIndex,
                     active = isMine && running?.index == i,
+                    depth = blocks.depth(i),
+                    endLabel = blocks.endLabel(i),
+                    structureProblem = blocks.problems[i],
+                    allowed = BlockEdits.allowed(wf.steps, i, blocks),
+                    inside = BlockEdits.stepsInside(wf.steps, i),
                     modifier = Modifier.animateItem(),
                     onOpen = { nav.push(Screen.StepEdit(wf.id, step.id, null, i)) },
-                    onMove = { dir ->
-                        val j = i + dir
-                        if (j in wf.steps.indices) {
-                            val list = wf.steps.toMutableList()
-                            val t = list[i]; list[i] = list[j]; list[j] = t
-                            save(wf.copy(steps = list))
-                        }
-                    },
-                    onDuplicate = {
-                        val list = wf.steps.toMutableList()
-                        list.add(i + 1, step.copy(id = UUID.randomUUID().toString()))
-                        save(wf.copy(steps = list))
-                    },
+                    onMove = { dir -> save(wf.copy(steps = BlockEdits.move(wf.steps, i, dir))) },
+                    onDuplicate = { save(wf.copy(steps = BlockEdits.duplicate(wf.steps, i))) },
                     onToggle = {
                         save(wf.copy(steps = wf.steps.map { if (it.id == step.id) it.copy(enabled = !it.enabled) else it }))
                     },
-                    onInsertBelow = { dialog = EditorDialog.AddStep(i + 1) },
+                    // On an Otherwise / End row "add" puts the new step just above it — inside the block.
+                    onInsertBelow = { dialog = EditorDialog.AddStep(if (StepCatalog.isMarker(step.type)) i else i + 1) },
                     onRunFrom = { Runner.launch(ctx, wf.id, Trigger.MANUAL, startAt = i)?.let { toast(it.message) } },
                     onRunOnly = { Runner.launch(ctx, wf.id, Trigger.MANUAL, startAt = i, endExclusive = i + 1)?.let { toast(it.message) } },
-                    onDelete = {
-                        val before = wf
-                        save(wf.copy(steps = wf.steps.filterNot { it.id == step.id }))
-                        scope.launch {
-                            snack.currentSnackbarData?.dismiss()
-                            val r = snack.showSnackbar("Step deleted", actionLabel = "Undo", withDismissAction = true)
-                            if (r == SnackbarResult.ActionPerformed) save(Repo.get(before.id)?.copy(steps = before.steps) ?: before)
-                        }
-                    },
+                    onDelete = { deleted("Step deleted", BlockEdits.delete(wf.steps, i)) },
+                    onUnwrap = { deleted("${StepCatalog.titleOf(step)} removed — the steps inside stay", BlockEdits.unwrap(wf.steps, i)) },
+                    onDeleteBlock = { deleted("${StepCatalog.titleOf(step)} and the steps inside deleted", BlockEdits.deleteBlock(wf.steps, i)) },
+                    onAddOtherwise = { save(wf.copy(steps = BlockEdits.addOtherwise(wf.steps, i))) },
+                    onRemoveOtherwise = { deleted("“Otherwise” part deleted", BlockEdits.removeOtherwise(wf.steps, i)) },
                 )
             }
             if (wf.steps.isNotEmpty()) {
@@ -448,6 +453,14 @@ private fun StepRow(
     isFirst: Boolean,
     isLast: Boolean,
     active: Boolean,
+    /** How many If / Repeat blocks this row is inside. */
+    depth: Int,
+    endLabel: String,
+    /** "This If has no End" … — from core/Blocks. */
+    structureProblem: String?,
+    allowed: BlockEdits.Allowed,
+    /** Steps inside, for an If / Repeat. */
+    inside: Int,
     modifier: Modifier,
     onOpen: () -> Unit,
     onMove: (Int) -> Unit,
@@ -457,20 +470,28 @@ private fun StepRow(
     onRunFrom: () -> Unit,
     onRunOnly: () -> Unit,
     onDelete: () -> Unit,
+    onUnwrap: () -> Unit,
+    onDeleteBlock: () -> Unit,
+    onAddOtherwise: () -> Unit,
+    onRemoveOtherwise: () -> Unit,
 ) {
     val info = StepCatalog.info(step.type)
-    val issues = StepCatalog.issues(step)
+    val marker = StepCatalog.isMarker(step.type)
+    val issues = listOfNotNull(structureProblem) + StepCatalog.issues(step)
     val line = MaterialTheme.colorScheme.outlineVariant
+    val logic = Category.LOGIC.tint
     var menu by remember { mutableStateOf(false) }
     Row(modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
         Column(Modifier.width(40.dp).fillMaxHeight(), horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(Modifier.width(2.dp).height(18.dp).background(if (isFirst) Color.Transparent else line))
+            Box(Modifier.width(2.dp).height(if (marker) 10.dp else 18.dp).background(if (isFirst) Color.Transparent else line))
             Box(
                 Modifier
-                    .size(28.dp)
+                    .size(if (marker) 20.dp else 28.dp)
                     .clip(CircleShape)
                     .background(
                         when {
+                            structureProblem != null -> Danger
+                            marker -> logic.copy(alpha = 0.55f)
                             active -> MaterialTheme.colorScheme.secondary
                             !step.enabled -> MaterialTheme.colorScheme.surfaceContainerHighest
                             issues.isNotEmpty() -> Warn
@@ -481,61 +502,128 @@ private fun StepRow(
             ) {
                 Text(
                     "${index + 1}",
-                    style = MaterialTheme.typography.labelMedium,
+                    style = if (marker) MaterialTheme.typography.labelSmall else MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
-                    color = if (!step.enabled) MaterialTheme.colorScheme.onSurfaceVariant else Color.White,
+                    color = if (!step.enabled && !marker) MaterialTheme.colorScheme.onSurfaceVariant else Color.White,
                 )
             }
             Box(Modifier.width(2.dp).weight(1f).background(if (isLast) Color.Transparent else line))
         }
+        // One rail per block this row is inside, so the If part / Repeat body reads at a glance.
+        repeat(depth) {
+            Box(Modifier.width(14.dp).fillMaxHeight(), contentAlignment = Alignment.CenterStart) {
+                Box(Modifier.width(3.dp).fillMaxHeight().clip(RoundedCornerShape(2.dp)).background(logic.copy(alpha = 0.35f)))
+            }
+        }
         Card(
             onClick = onOpen,
-            modifier = Modifier.weight(1f).padding(vertical = 5.dp).alpha(if (step.enabled) 1f else 0.55f),
+            modifier = Modifier.weight(1f).padding(vertical = if (marker) 3.dp else 5.dp).alpha(if (step.enabled || marker) 1f else 0.55f),
             shape = MaterialTheme.shapes.medium,
             colors = CardDefaults.cardColors(
-                containerColor = if (active) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
+                containerColor = when {
+                    active -> MaterialTheme.colorScheme.secondaryContainer
+                    marker || StepCatalog.isLogic(step.type) -> logic.copy(alpha = 0.10f)
+                    else -> MaterialTheme.colorScheme.surfaceContainerLow
+                },
             ),
-            elevation = CardDefaults.cardElevation(defaultElevation = if (active) 3.dp else 1.dp),
+            elevation = CardDefaults.cardElevation(defaultElevation = if (active) 3.dp else if (marker) 0.dp else 1.dp),
         ) {
-            Row(Modifier.padding(start = 12.dp, top = 12.dp, bottom = 12.dp, end = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                IconBadge(info.icon, info.category.tint, 38.dp, 20.dp)
+            Row(
+                Modifier.padding(start = 12.dp, top = if (marker) 2.dp else 12.dp, bottom = if (marker) 2.dp else 12.dp, end = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (marker) {
+                    Icon(info.icon, null, Modifier.size(18.dp), tint = logic)
+                } else {
+                    IconBadge(info.icon, info.category.tint, 38.dp, 20.dp)
+                }
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(StepCatalog.titleOf(step), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    val title = if (step.type == StepType.END) endLabel else StepCatalog.titleOf(step)
                     Text(
-                        StepCatalog.summary(step),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 2,
+                        title,
+                        style = if (marker) MaterialTheme.typography.labelLarge else MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (marker) logic else MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    if (issues.isNotEmpty() && step.enabled) {
+                    val summary = StepCatalog.summary(step)
+                    if (summary.isNotBlank() && step.type != StepType.ELSE) {
+                        Text(
+                            summary,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    if (issues.isNotEmpty() && (step.enabled || structureProblem != null)) {
                         Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Rounded.WarningAmber, null, Modifier.size(14.dp), tint = Warn)
+                            Icon(Icons.Rounded.WarningAmber, null, Modifier.size(14.dp), tint = if (structureProblem != null) Danger else Warn)
                             Spacer(Modifier.width(4.dp))
-                            Text(issues.first(), style = MaterialTheme.typography.labelSmall, color = Warn)
+                            Text(issues.first(), style = MaterialTheme.typography.labelSmall, color = if (structureProblem != null) Danger else Warn)
                         }
                     }
-                    if (!step.enabled) Text("Turned off — skipped when running", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (!step.enabled && !marker) {
+                        Text(
+                            when (step.type) {
+                                StepType.IF -> "Turned off — the steps inside always run"
+                                StepType.REPEAT -> "Turned off — the steps inside run once"
+                                else -> "Turned off — skipped when running"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
                 Box {
                     IconButton(onClick = { menu = true }) { Icon(Icons.Rounded.MoreVert, "Step options") }
                     DropdownMenu(menu, { menu = false }) {
-                        DropdownMenuItem(text = { Text("Edit") }, leadingIcon = { Icon(Icons.Rounded.Edit, null) }, onClick = { menu = false; onOpen() })
-                        if (!isFirst) DropdownMenuItem(text = { Text("Move up") }, leadingIcon = { Icon(Icons.Rounded.ArrowUpward, null) }, onClick = { menu = false; onMove(-1) })
-                        if (!isLast) DropdownMenuItem(text = { Text("Move down") }, leadingIcon = { Icon(Icons.Rounded.ArrowDownward, null) }, onClick = { menu = false; onMove(1) })
-                        DropdownMenuItem(text = { Text("Add step below") }, leadingIcon = { Icon(Icons.Rounded.Add, null) }, onClick = { menu = false; onInsertBelow() })
-                        DropdownMenuItem(text = { Text("Duplicate") }, leadingIcon = { Icon(Icons.Rounded.ContentCopy, null) }, onClick = { menu = false; onDuplicate() })
+                        val what = StepCatalog.titleOf(step)
+                        if (!marker) DropdownMenuItem(text = { Text("Edit") }, leadingIcon = { Icon(Icons.Rounded.Edit, null) }, onClick = { menu = false; onOpen() })
+                        if (allowed.moveUp) DropdownMenuItem(text = { Text("Move up") }, leadingIcon = { Icon(Icons.Rounded.ArrowUpward, null) }, onClick = { menu = false; onMove(-1) })
+                        if (allowed.moveDown) DropdownMenuItem(text = { Text("Move down") }, leadingIcon = { Icon(Icons.Rounded.ArrowDownward, null) }, onClick = { menu = false; onMove(1) })
                         DropdownMenuItem(
+                            text = { Text(if (marker) "Add a step here" else if (StepCatalog.opensBlock(step.type)) "Add a step inside" else "Add step below") },
+                            leadingIcon = { Icon(Icons.Rounded.Add, null) },
+                            onClick = { menu = false; onInsertBelow() },
+                        )
+                        if (allowed.addOtherwise) DropdownMenuItem(text = { Text("Add “Otherwise”") }, leadingIcon = { Icon(Icons.Rounded.AltRoute, null) }, onClick = { menu = false; onAddOtherwise() })
+                        if (allowed.duplicate) DropdownMenuItem(text = { Text("Duplicate") }, leadingIcon = { Icon(Icons.Rounded.ContentCopy, null) }, onClick = { menu = false; onDuplicate() })
+                        if (allowed.toggle) DropdownMenuItem(
                             text = { Text(if (step.enabled) "Turn off" else "Turn on") },
                             leadingIcon = { Icon(if (step.enabled) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility, null) },
                             onClick = { menu = false; onToggle() },
                         )
-                        HorizontalDivider()
-                        DropdownMenuItem(text = { Text("Run only this step") }, leadingIcon = { Icon(Icons.Rounded.SkipNext, null) }, onClick = { menu = false; onRunOnly() })
-                        DropdownMenuItem(text = { Text("Run from here") }, leadingIcon = { Icon(Icons.Rounded.FastForward, null) }, onClick = { menu = false; onRunFrom() })
-                        HorizontalDivider()
-                        DropdownMenuItem(text = { Text("Delete", color = Danger) }, leadingIcon = { Icon(Icons.Rounded.Delete, null, tint = Danger) }, onClick = { menu = false; onDelete() })
+                        if (allowed.run) {
+                            HorizontalDivider()
+                            DropdownMenuItem(
+                                text = { Text(if (step.type == StepType.IF) "Check it now" else "Run only this step") },
+                                leadingIcon = { Icon(Icons.Rounded.SkipNext, null) },
+                                onClick = { menu = false; onRunOnly() },
+                            )
+                            DropdownMenuItem(text = { Text("Run from here") }, leadingIcon = { Icon(Icons.Rounded.FastForward, null) }, onClick = { menu = false; onRunFrom() })
+                        }
+                        if (allowed.delete || allowed.unwrap || allowed.removeOtherwise) HorizontalDivider()
+                        if (allowed.removeOtherwise) DropdownMenuItem(
+                            text = { Text("Delete the “Otherwise” part", color = Danger) },
+                            leadingIcon = { Icon(Icons.Rounded.Delete, null, tint = Danger) },
+                            onClick = { menu = false; onRemoveOtherwise() },
+                        )
+                        if (allowed.unwrap) {
+                            DropdownMenuItem(
+                                text = { Text("Remove $what, keep the steps inside") },
+                                leadingIcon = { Icon(Icons.Rounded.UnfoldLess, null) },
+                                onClick = { menu = false; onUnwrap() },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (inside > 0) "Delete $what and its $inside step${if (inside == 1) "" else "s"}" else "Delete $what", color = Danger) },
+                                leadingIcon = { Icon(Icons.Rounded.Delete, null, tint = Danger) },
+                                onClick = { menu = false; onDeleteBlock() },
+                            )
+                        }
+                        if (allowed.delete) DropdownMenuItem(text = { Text("Delete", color = Danger) }, leadingIcon = { Icon(Icons.Rounded.Delete, null, tint = Danger) }, onClick = { menu = false; onDelete() })
                     }
                 }
             }
@@ -569,7 +657,7 @@ fun AddStepSheet(onDismiss: () -> Unit, onRecord: (() -> Unit)? = null, onPick: 
             }
             items(Category.entries.toList(), key = { it.name }) { cat ->
                 val expanded = open == cat
-                val actions = StepCatalog.all.filter { it.category == cat }
+                val actions = StepCatalog.all.filter { it.category == cat && it.inSheet }
                 Card(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
                     shape = MaterialTheme.shapes.large,

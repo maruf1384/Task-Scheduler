@@ -100,4 +100,32 @@ class SavedFilesTest {
         assertTrue(out.contains("\"status\":\"skipped\""))
         assertEquals(RunStatus.SKIPPED, Repo.json.decodeFromString<List<RunRecord>>(out)[0].status)
     }
+
+    /** 1.5.0 adds If / Otherwise / End / Repeat / Stop as ordinary steps; conditions are JSON text in `p`. */
+    @Test fun `an automation with If and Repeat is saved and read back`() {
+        var iff = com.taskpilot.app.core.Conditions.with(
+            Step(id = "i", type = StepType.IF, p = mapOf("match" to "all", "waitUpTo" to "60")),
+            listOf(com.taskpilot.app.core.Cond("screen_text", false, mapOf("text" to "[Program finished]", "pkg" to "ru.iiec.pydroid3"))),
+        )
+        iff = iff.copy(label = "Script done?")
+        val wf = Workflow(
+            id = "w", name = "Logic",
+            steps = listOf(
+                iff,
+                Step(id = "a", type = StepType.SELECT_FILES, p = mapOf("onFail" to "retry", "retries" to "2")),
+                Step(id = "e", type = StepType.ELSE),
+                Step(id = "s", type = StepType.STOP, p = mapOf("result" to "fail", "message" to "Script didn't finish")),
+                Step(id = "n", type = StepType.END),
+                Step(id = "r", type = StepType.REPEAT, p = mapOf("mode" to "each")),
+                Step(id = "m", type = StepType.SEND_WHATSAPP, p = mapOf("phone" to "01521216482", "caption" to "{loop.file}")),
+                Step(id = "n2", type = StepType.END),
+            ),
+        )
+        val text = Repo.json.encodeToString(listOf(wf))
+        assertTrue(text.contains("\"type\":\"IF\""))
+        val back = Repo.json.decodeFromString<List<Workflow>>(text)[0]
+        assertEquals(wf, back)
+        assertTrue(com.taskpilot.app.core.Blocks.of(back.steps).ok)
+        assertEquals("[Program finished]", com.taskpilot.app.core.Conditions.of(back.steps[0])[0].s("text"))
+    }
 }

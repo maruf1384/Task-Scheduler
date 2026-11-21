@@ -360,7 +360,8 @@ private fun WorkflowCard(
 ) {
     var menu by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
-    val issues = wf.steps.filter { it.enabled }.sumOf { StepCatalog.issues(it).size }
+    val issues = wf.steps.filter { it.enabled }.sumOf { StepCatalog.issues(it).size } +
+        com.taskpilot.app.core.Blocks.of(wf.steps).problems.size
     Card(
         onClick = onOpen,
         shape = MaterialTheme.shapes.large,

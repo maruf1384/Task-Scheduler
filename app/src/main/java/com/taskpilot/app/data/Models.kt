@@ -26,6 +26,13 @@ enum class StepType {
     SCROLL,
     OPEN_URL,
     SEND_EMAIL,
+
+    // ---- logic (1.5.0): a flat list with markers, like "If … Otherwise … End"
+    IF,
+    ELSE,
+    END,
+    REPEAT,
+    STOP,
 }
 
 /**

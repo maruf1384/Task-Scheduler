@@ -76,6 +76,9 @@ enum class Refusal(val message: String) {
     RECORDING("You were building in an app — tap Done on the floating bar first."),
     CAPTURING("You were picking a button — capture or cancel that first."),
     GONE("That automation no longer exists."),
+
+    /** An If or Repeat without its End, an extra End… (see `Blocks.problems`). Added in 1.5.0. */
+    BROKEN_BLOCKS("Some If / Repeat steps don't fit together. Open the automation — the step to fix is marked."),
 }
 
 sealed interface EngineEvent {

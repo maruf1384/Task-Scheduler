@@ -1,7 +1,11 @@
 package com.taskpilot.app.ui
 
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AltRoute
 import androidx.compose.material.icons.rounded.Apps
+import androidx.compose.material.icons.rounded.Repeat
+import androidx.compose.material.icons.rounded.StopCircle
+import androidx.compose.material.icons.rounded.UnfoldLess
 import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.EditNote
 import androidx.compose.material.icons.rounded.Email
@@ -26,6 +30,10 @@ import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.Forum
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import com.taskpilot.app.core.Conditions
+import com.taskpilot.app.core.FlowMachine
+import com.taskpilot.app.core.OnFail
+import com.taskpilot.app.core.RepeatMode
 import com.taskpilot.app.data.EditParams
 import com.taskpilot.app.data.Phone
 import com.taskpilot.app.data.Selector
@@ -39,7 +47,8 @@ enum class Category(val title: String, val blurb: String, val icon: ImageVector,
     APPS("Apps", "Open apps or open a file inside an app", Icons.Rounded.Apps, Color(0xFF6366F1)),
     SCREEN("On-screen actions", "Tap buttons, wait for things, type, press keys", Icons.Rounded.TouchApp, Color(0xFF0EA5E9)),
     SEND("Send & share", "WhatsApp or any app that accepts files", Icons.Rounded.Forum, Color(0xFF22C55E)),
-    DEVICE("Device & flow", "Wake, wait, notify, lock", Icons.Rounded.Tune, Color(0xFFEC4899)),
+    DEVICE("Device", "Wake, wait, notify, lock", Icons.Rounded.Tune, Color(0xFFEC4899)),
+    LOGIC("If, repeat & stop", "Decide what happens next from the screen, files or time", Icons.Rounded.AltRoute, Color(0xFF8B5CF6)),
 }
 
 data class StepInfo(
@@ -48,6 +57,8 @@ data class StepInfo(
     val description: String,
     val icon: ImageVector,
     val category: Category,
+    /** False for “Otherwise” and “End”: they are added from the If / Repeat they belong to. */
+    val inSheet: Boolean = true,
 )
 
 object StepCatalog {
@@ -74,7 +85,22 @@ object StepCatalog {
         StepInfo(StepType.DELAY, "Wait", "Pause for a few seconds.", Icons.Rounded.Timer, Category.DEVICE),
         StepInfo(StepType.NOTIFY, "Show a notification", "Leave yourself a note when something is done.", Icons.Rounded.Notifications, Category.DEVICE),
         StepInfo(StepType.LOCK_SCREEN, "Lock screen", "Turn the screen off again at the end.", Icons.Rounded.Lock, Category.DEVICE),
+
+        StepInfo(StepType.IF, "If", "Run some steps only when something is true — text on screen, a file exists, a day or time, the battery… With “Otherwise” for when it isn't.", Icons.Rounded.AltRoute, Category.LOGIC),
+        StepInfo(StepType.REPEAT, "Repeat", "Run some steps again: a number of times, once for each file, or until something is true.", Icons.Rounded.Repeat, Category.LOGIC),
+        StepInfo(StepType.STOP, "Stop the automation", "Finish here — as done or as failed, with your own message.", Icons.Rounded.StopCircle, Category.LOGIC),
+        StepInfo(StepType.ELSE, "Otherwise", "The steps for when the If isn't true.", Icons.Rounded.AltRoute, Category.LOGIC, inSheet = false),
+        StepInfo(StepType.END, "End", "Closes an If or a Repeat.", Icons.Rounded.UnfoldLess, Category.LOGIC, inSheet = false),
     )
+
+    /** If / Otherwise / End / Repeat / Stop: they steer the run rather than do something. */
+    fun isLogic(t: StepType): Boolean = info(t).category == Category.LOGIC
+
+    /** “Otherwise” and “End”: markers that only exist as part of an If / Repeat. */
+    fun isMarker(t: StepType): Boolean = t == StepType.ELSE || t == StepType.END
+
+    /** Steps that open a block and get an End added under them. */
+    fun opensBlock(t: StepType): Boolean = t == StepType.IF || t == StepType.REPEAT
 
     fun info(t: StepType): StepInfo = all.first { it.type == t }
 
@@ -95,12 +121,37 @@ object StepCatalog {
         StepType.SCROLL -> Step(type = t, p = mapOf("dir" to "down", "times" to "1", "timeout" to "15"))
         StepType.OPEN_URL -> Step(type = t, p = mapOf("url" to "https://"))
         StepType.SEND_EMAIL -> Step(type = t, p = mapOf("app" to "com.google.android.gm", "appName" to "Gmail", "attach" to "true", "autoSend" to "true"))
+        StepType.IF -> Step(type = t, p = mapOf("conds" to "[]", "match" to "all", "waitUpTo" to "0"))
+        StepType.REPEAT -> Step(type = t, p = mapOf("mode" to "times", "count" to "3", "max" to "20", "conds" to "[]", "match" to "all"))
+        StepType.STOP -> Step(type = t, p = mapOf("result" to "ok"))
         else -> Step(type = t)
     }
 
     private fun name(path: String) = File(path).name
 
-    fun summary(step: Step): String = when (step.type) {
+    /** One line under the step's title in the list. */
+    fun summary(step: Step): String = baseSummary(step) + failNote(step)
+
+    /** " · tries 3×" when the step is set to do something other than stop on failure. */
+    fun failNote(step: Step): String = if (isLogic(step.type)) "" else when (OnFail.of(step)) {
+        OnFail.STOP -> ""
+        OnFail.RETRY -> " · up to ${step.i("retries", 2) + 1} tries"
+        OnFail.CONTINUE -> " · carries on if it fails"
+    }
+
+    private fun baseSummary(step: Step): String = when (step.type) {
+        StepType.IF -> Conditions.summary(step) +
+            (step.i("waitUpTo", 0).takeIf { it > 0 }?.let { " · waits up to ${fmtSecs(it)}" } ?: "")
+        StepType.ELSE -> "When the If above isn't true"
+        StepType.END -> ""
+        StepType.REPEAT -> when (RepeatMode.of(step)) {
+            RepeatMode.TIMES -> "${step.i("count", 3)} times"
+            RepeatMode.EACH_FILE -> "Once for each selected file"
+            RepeatMode.UNTIL -> "Until ${Conditions.summary(step)} · at most ${step.i("max", 20)} rounds"
+            RepeatMode.WHILE -> "While ${Conditions.summary(step)} · at most ${step.i("max", 20)} rounds"
+        }
+        StepType.STOP -> if (step.s("result") == "fail") "Stop as failed" + (step.s("message").takeIf { it.isNotBlank() }?.let { " · “${it.take(40)}”" } ?: "")
+            else "Finish here as done" + (step.s("message").takeIf { it.isNotBlank() }?.let { " · “${it.take(40)}”" } ?: "")
         StepType.WAKE_UNLOCK -> if (step.b("usePin", false)) "Screen on · unlock with your saved PIN" else "Screen on · open lock screen"
         StepType.LAUNCH_APP -> step.s("appName").ifBlank { "Choose an app" }
         StepType.OPEN_FILE -> if (step.s("path").isBlank()) "Choose a file" else "${name(step.s("path"))} → ${step.s("appName").ifBlank { "default app" }}"
@@ -177,6 +228,12 @@ object StepCatalog {
             StepType.EDIT_FILE -> {
                 if (step.s("path").isBlank()) out += "Choose a file"
                 else if (EditParams.edits(step).isEmpty()) out += "Add a change"
+            }
+            StepType.IF -> out += Conditions.problems(step)
+            StepType.REPEAT -> when (RepeatMode.of(step)) {
+                RepeatMode.TIMES -> if (step.p["count"]?.trim()?.toIntOrNull()?.takeIf { it in 0..FlowMachine.MAX_ROUNDS } == null) out += "Enter how many times (0–${FlowMachine.MAX_ROUNDS})"
+                RepeatMode.EACH_FILE -> {}
+                RepeatMode.UNTIL, RepeatMode.WHILE -> out += Conditions.problems(step)
             }
             else -> {}
         }
