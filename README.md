@@ -11,9 +11,13 @@ No server, no account, no background service.
 | Apps | **Open file in app** (e.g. `.py` in Pydroid 3), **Open app** |
 | On-screen actions | **Tap a button** (picked from a live screenshot), **Wait for something on screen**, **Type text**, **Back / Home / Recents** |
 | Send & share | **Send to WhatsApp number** (auto-presses Send), **Share files to any app** |
-| Device & flow | **Wake & unlock** (optional PIN), **Wait**, **Notification**, **Lock screen** |
+| Device | **Wake & unlock** (optional PIN), **Wait**, **Notification**, **Lock screen** |
+| If, repeat & stop | **If … Otherwise … End**, **Repeat … End** (times / for each file / until / while), **Stop the automation** |
 
-Captions and notifications understand `{date}`, `{time}`, `{count}`, `{files}`.
+Every normal step also has **If this step fails → Stop / Try again / Carry on**.
+
+Captions and notifications understand `{date}`, `{time}`, `{count}`, `{files}`, and inside a Repeat
+`{loop.index}`, `{loop.count}`, `{loop.file}`.
 
 ## Ready-made recipe: *Weekly Demand → WhatsApp*
 
@@ -63,6 +67,34 @@ Send pressed automatically), **Scroll**. Smart dates (`{lastweek.start|d MMM}` �
 *Add step → On-screen actions → Tap a button → Pick on screen.*
 TaskPilot opens the app (or runs the earlier steps first to reach the right screen), shows a floating **◉ Capture** bar, and brings back a picture of that screen with every tappable thing outlined. Tap the one you want (e.g. *Run*, *Undo*, *Redo*) — or use the List tab to search by name.
 
+## Deciding what happens next (If, Repeat, Stop)
+
+*Add step → If, repeat & stop.* Adding an **If** or a **Repeat** also adds its **End**; the steps between
+them are drawn indented with a purple rail, so you can see what belongs inside.
+
+* **If** runs the steps inside only when its conditions are true. Conditions are chosen the same
+  branch → sub-branch way: *On screen* (text is on screen, an app is in front) · *Files* (a file or
+  folder exists, files were found) · *Date & time* (day of the week, time between, day of the month) ·
+  *This run* (the previous step worked) · *Phone* (battery, charging, internet). Any of them can be
+  turned around (“is **not** on screen”), and several can be combined with *all* or *any*.
+  An If can **wait up to N seconds** for its answer to become yes — e.g. for Pydroid to show
+  “[Program finished]”. ⋮ on an If → **Add “Otherwise”** for the steps to run when the answer is no.
+  ⋮ → **Check it now** tests just the condition and writes the answer in History.
+* **Repeat** runs its steps *a number of times*, *once for each selected file* (each round gets one
+  file — e.g. send every output file with its own caption), *until* something is true, or *while*
+  it is. Until/while have a safety limit (20 rounds unless you change it).
+* **Stop the automation** finishes the run there, as done ✓ or failed ✗, with your message —
+  e.g. *If “No files were found” → Stop as done “Nothing new today”*.
+* **If this step fails** (at the bottom of every step): *Try again* (up to 10 times, with a pause)
+  for a slow app or a button that appears late, or *Carry on* — then an If with *The previous step
+  failed* can react to it, e.g. send yourself a notification.
+
+Moving an If or a Repeat moves its whole block. ⋮ → **Remove, keep the steps inside** or **Delete … and its
+N steps** (with Undo). If something doesn't fit together (an End with nothing above it…), the step is
+marked in red and runs don't start until it's fixed.
+
+Every check, round and retry is a line in History, so a run can always be followed afterwards.
+
 ## When something goes wrong
 
 *History → open the run → **Copy report***. The report has the app and Android version, which permissions are
@@ -92,7 +124,8 @@ All builds are signed with the included `app/taskpilot.keystore`, so updates ins
 
 ```
 app/src/main/java/com/taskpilot/app/
-  core/     State machines as pure Kotlin (unit-tested): engine mode, recorder, screen following, send flow…
+  core/     State machines as pure Kotlin (unit-tested): engine mode, recorder, screen following, send flow,
+            If/Repeat blocks, conditions and the flow interpreter…
   data/     Models (Workflow, Step, Schedule, RunRecord), JSON storage, the template
   engine/   Engine (who owns the screen), Runner, StepExec, AutomationService, Recorder, Capture, Scheduler, Updater
   ui/       Compose UI: Home (Automations / History / Setup), Editor, Step editor, pickers, recorder overlay

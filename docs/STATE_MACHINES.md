@@ -5,7 +5,7 @@ An *implicit* one is where the situation is never written down — it has to be 
 handful of booleans, nullable fields, strings and timestamps, and some combinations of those
 should never happen but nothing stops them.
 
-Version 1.4.0 went through the whole app looking for these. This file is the result: what was
+Version 1.4.0 went through the whole app looking for these (1.5.0 added §12, the If / Repeat interpreter). This file is the result: what was
 found, what was made explicit, what was deliberately left alone, and the rules for changing them.
 
 **The pattern used everywhere it was worth it**
@@ -164,6 +164,61 @@ Each screen had 2–5 independent "is this dialog open" flags (and the step edit
 *Before:* "the file could not be read" looked exactly like "nothing saved yet": an empty list —
 which the next save wrote over the real file. *Now:* an unreadable file is first copied aside
 (`workflows.json.unreadable-<time>`), and Home says so.
+
+## 12. Running If / Otherwise / Repeat / Stop — `FlowMachine` (new in 1.5.0)
+
+`core/Blocks.kt` (`BlocksTest`), `core/BlockEdits.kt` (`BlockEditsTest`), `core/Conditions.kt`
+(`ConditionsTest`), `core/FlowMachine.kt` (`FlowMachineTest`), driven by `engine/Runner.runSteps`;
+the phone's answers come from `engine/PhoneConditions`.
+
+The automation stays a **flat list**. If / Otherwise / End / Repeat / Stop are steps like any other,
+so 1.4 files load unchanged and positions keep meaning what they meant ("Run from here", the
+recorder inserting at a position, "Pick on screen → run steps 1–N first").
+
+* `Blocks.of(steps)` — a stack parser: which End closes which If/Repeat, the Otherwise of each If,
+  how deep each row is, and a list of `problems` by position. A run with problems is refused
+  (`Refusal.BROKEN_BLOCKS`; a scheduled one leaves a History entry naming the step).
+* `BlockEdits` — the only way the editor changes the list: an If/Repeat moves, copies and deletes
+  as a whole block; Otherwise/End never move alone. *Every move keeps the list fitting* is a test.
+* `Conditions` — conditions are data (`Cond(kind, not, p)`, JSON text in the step's `conds`);
+  `eval` asks a `CondEnv` for anything that needs the phone. The time ones are pure and tested
+  (crossing midnight, “last day of the month”, …). A lookup that throws counts as *not met*.
+* `FlowMachine` — an interpreter with an explicit state `FlowState(pc, frames, attempt, lastOk,
+  actions, waiting)`. The runner asks `next(state)` and gets one instruction:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Deciding
+    Deciding --> RunStep: Run(pc, attempt, delay)
+    Deciding --> Checking: Check(pc) — an If, or a Repeat until/while
+    Deciding --> Counting: Count(pc) — "for each file" starts
+    Deciding --> Deciding: Skipped / Note (logged)
+    RunStep --> Deciding: StepDone(ok) — ok: next · failed: stop / retry / carry on
+    Checking --> Deciding: Checked(met) — jump to the If part / Otherwise / past the End / next round
+    Counting --> Deciding: Counted(n)
+    Deciding --> [*]: Finish(status, message)
+```
+
+`waiting` records which answer is expected; giving another one is a programming error
+(`require`, tested). Rules worth knowing:
+
+| Situation | What happens |
+|---|---|
+| If turned off | counts as met — the steps inside run |
+| Repeat turned off | its steps run once |
+| Reaching Otherwise from the If part | jump past the End |
+| Started in the middle ("Run from here") | an End whose Repeat isn't going round just passes |
+| Repeat until / while | stops at `max` rounds (default 20) with a warning line, and carries on |
+| More than 10 000 steps + checks + rounds | the run fails: "a Repeat probably never ends" |
+| `until` (Capture / "Run only this step") | finishes as soon as the position is reached |
+
+`Runner` owns only the Android side: running a step, polling an If's conditions for up to
+`waitUpTo` seconds, giving each "for each file" round one file in `rc.files` (and all of them back
+after the End), the `{loop.*}` placeholders, and at most 400 History lines per run. `Trace` gets
+"Check step 3: met" — never the screen text that was compared.
+
+**Downgrading:** a file with these steps can't be read by 1.4 or older (unknown step type), and
+`Repo.loadProblem` would set it aside. Updates only go forward, so this is accepted.
 
 ---
 

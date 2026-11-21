@@ -8,6 +8,7 @@ import com.taskpilot.app.core.EngineMode
 import com.taskpilot.app.core.FlowAnswer
 import com.taskpilot.app.core.FlowMachine
 import com.taskpilot.app.core.FlowNext
+import com.taskpilot.app.core.FlowState
 import com.taskpilot.app.core.LoopFrame
 import com.taskpilot.app.core.OnFail
 import com.taskpilot.app.core.RepeatMode

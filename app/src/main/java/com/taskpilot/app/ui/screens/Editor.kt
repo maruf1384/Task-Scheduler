@@ -309,7 +309,11 @@ fun EditorScreen(wfId: String, nav: Nav) {
                     // On an Otherwise / End row "add" puts the new step just above it — inside the block.
                     onInsertBelow = { dialog = EditorDialog.AddStep(if (StepCatalog.isMarker(step.type)) i else i + 1) },
                     onRunFrom = { Runner.launch(ctx, wf.id, Trigger.MANUAL, startAt = i)?.let { toast(it.message) } },
-                    onRunOnly = { Runner.launch(ctx, wf.id, Trigger.MANUAL, startAt = i, endExclusive = i + 1)?.let { toast(it.message) } },
+                    // A Repeat runs as a whole block; anything else on its own (an If: just its check).
+                    onRunOnly = {
+                        val endEx = if (step.type == StepType.REPEAT && blocks.end(i) > i) blocks.end(i) + 1 else i + 1
+                        Runner.launch(ctx, wf.id, Trigger.MANUAL, startAt = i, endExclusive = endEx)?.let { toast(it.message) }
+                    },
                     onDelete = { deleted("Step deleted", BlockEdits.delete(wf.steps, i)) },
                     onUnwrap = { deleted("${StepCatalog.titleOf(step)} removed — the steps inside stay", BlockEdits.unwrap(wf.steps, i)) },
                     onDeleteBlock = { deleted("${StepCatalog.titleOf(step)} and the steps inside deleted", BlockEdits.deleteBlock(wf.steps, i)) },
@@ -599,7 +603,15 @@ private fun StepRow(
                         if (allowed.run) {
                             HorizontalDivider()
                             DropdownMenuItem(
-                                text = { Text(if (step.type == StepType.IF) "Check it now" else "Run only this step") },
+                                text = {
+                                    Text(
+                                        when (step.type) {
+                                            StepType.IF -> "Check it now"
+                                            StepType.REPEAT -> "Run only this Repeat"
+                                            else -> "Run only this step"
+                                        },
+                                    )
+                                },
                                 leadingIcon = { Icon(Icons.Rounded.SkipNext, null) },
                                 onClick = { menu = false; onRunOnly() },
                             )

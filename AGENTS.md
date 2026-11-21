@@ -29,6 +29,7 @@ There is no Android SDK requirement for you: **GitHub Actions is the build** (`.
 app/src/main/java/com/taskpilot/app/
   core/    State machines and rules as PURE Kotlin — no android.*, no androidx.* (CI enforces it).
            EngineMode · RecorderMachine · ScreenWatch · SendFlow · FilesWatch · Status · Flows · Trace
+           Blocks · BlockEdits · Conditions · FlowMachine (If / Otherwise / Repeat / Stop, since 1.5.0)
   data/    Models (Workflow, Step, Schedule, RunRecord), Repo (JSON files), Templates
   engine/  Android glue: Engine (who owns the screen), Runner, StepExec, AutomationService
            (accessibility), Recorder, Capture, Scheduler, Updater, SecretStore, Diagnostics
@@ -52,7 +53,12 @@ docs/STATE_MACHINES.md   Every state machine: states, diagram, what it replaced,
 5. **Secrets:** the lock-screen PIN lives only in `SecretStore` (Android Keystore). It must never
    reach a `Step`, a log, `Trace`, a notification or `Diagnostics`. The recorder never records
    password fields. `Trace` takes state and event *names* only — no screen text, no typed text.
-6. **Nothing leaves the phone.** No network code, no analytics, backups disabled.
+6. **Nothing leaves the phone.** No network code, no analytics, backups disabled. There is no
+   INTERNET permission; `ACCESS_NETWORK_STATE` (1.5.0) only *reads* whether the phone is online.
+7. **The step list is flat.** If / Otherwise / End / Repeat / Stop are ordinary steps (markers);
+   `core/Blocks` works out the nesting every time, `core/FlowMachine` decides what runs next, and
+   the editor changes the list only through `core/BlockEdits`, so it always fits together. Don't
+   add a nested "children" field — positions are what "Run from here", the recorder and Capture use.
 
 ## When the owner reports a problem
 
